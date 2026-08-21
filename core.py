@@ -25,7 +25,6 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 _whisper = None
 _current_video = None
 
-
 def db():
     conn=sqlite3.connect(DB_PATH); conn.row_factory=sqlite3.Row; conn.execute("PRAGMA journal_mode=WAL"); return conn
 
@@ -40,16 +39,25 @@ def stamp(seconds): n=max(0,int(seconds or 0)); return f"{n//60:02d}:{n%60:02d}"
 def runtime_status():
     info=hardware_info(); return f"**Hardware:** `{info['mode']}` · **GPU:** {info['gpu']} · **VRAM:** {info['vram_gb']} GB · **RAM:** {info['ram_gb']} GB · **AI:** `{info.get('model','auto')}` · **Whisper:** `{WHISPER_MODEL}`"
 
+def _youtube_opts():
+    opts={"quiet":True,"extract_flat":True,"skip_download":True,"ignoreerrors":True,"retries":8,"fragment_retries":8,"socket_timeout":30,"source_address":"0.0.0.0","http_headers":{"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36","Accept-Language":"en-US,en;q=0.9"}}
+    # curl_cffi is installed with requirements.txt. Impersonation uses its TLS stack.
+    try: opts["impersonate"]="chrome"
+    except Exception: pass
+    if os.getenv("YT_DLP_NO_CHECK_CERTIFICATE","0").lower() in {"1","true","yes"}: opts["nocheckcertificate"]=True
+    return opts
+
 def playlist(url):
     try:
-        opts={"quiet":True,"extract_flat":True,"skip_download":True,"ignoreerrors":True}; out=[]
+        opts=_youtube_opts(); out=[]
         with yt_dlp.YoutubeDL(opts) as y: info=y.extract_info(url,download=False)
+        if not info:return [],"❌ YouTube không trả dữ liệu playlist. Kết nối từ Space tới YouTube có thể đang bị reset."
         for e in (info or {}).get("entries",[])[:150]:
             if not e or not e.get("id"): continue
             vid=e["id"]; item={"id":vid,"title":e.get("title") or vid,"url":f"https://www.youtube.com/watch?v={vid}","thumbnail":f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg","duration":e.get("duration") or 0}; out.append(item)
-            with db() as c: c.execute("INSERT INTO videos(video_id,title,url,thumbnail,duration) VALUES(?,?,?,?,?) ON CONFLICT(video_id) DO UPDATE SET title=excluded.title,url=excluded.url,thumbnail=excluded.thumbnail,duration=excluded.duration,updated_at=CURRENT_TIMESTAMP",(vid,item["title"],item["url"],item["thumbnail"],item["duration"]))
+            with db() as c:c.execute("INSERT INTO videos(video_id,title,url,thumbnail,duration) VALUES(?,?,?,?,?) ON CONFLICT(video_id) DO UPDATE SET title=excluded.title,url=excluded.url,thumbnail=excluded.thumbnail,duration=excluded.duration,updated_at=CURRENT_TIMESTAMP",(vid,item["title"],item["url"],item["thumbnail"],item["duration"]))
         return out,f"✅ {len(out)} video được đưa vào thư viện."
-    except Exception as e: return [],f"❌ Playlist error: {e}"
+    except Exception as e:return [],f"❌ Playlist error: {type(e).__name__}: {e}"
 
 def transcript_for(vid):
     if not vid or YouTubeTranscriptApi is None:return [],"❌ Transcript engine chưa sẵn sàng."
@@ -104,18 +112,15 @@ def explain(sentence):
 def _whisper_config():
     gpu=bool(torch is not None and torch.cuda.is_available())
     if gpu:return "cuda", "float16"
-    # CPU Basic currently provides 2 vCPU / 16 GB RAM; int8 is the safest default.
     return "cpu", os.getenv("WHISPER_CPU_COMPUTE", "int8")
 
 def get_whisper():
     global _whisper
     if WhisperModel is None:return None
     if _whisper is None:
-        device,compute=_whisper_config()
-        model_name=os.getenv("WHISPER_MODEL", "small" if device=="cuda" else "base")
+        device,compute=_whisper_config(); model_name=os.getenv("WHISPER_MODEL", "small" if device=="cuda" else "base")
         try:_whisper=WhisperModel(model_name,device=device,compute_type=compute)
-        except Exception:
-            _whisper=WhisperModel("tiny",device="cpu",compute_type="int8")
+        except Exception:_whisper=WhisperModel("tiny",device="cpu",compute_type="int8")
     return _whisper
 
 def check_speaking(target,audio,idx):
