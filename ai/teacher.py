@@ -19,9 +19,20 @@ except Exception:
     AutoModelForCausalLM = None
     AutoTokenizer = None
 
+try:
+    import spaces
+except Exception:
+    class _SpacesFallback:
+        @staticmethod
+        def GPU(*args, **kwargs):
+            def deco(fn):
+                return fn
+            return deco
+    spaces = _SpacesFallback()
 
 MODEL_NAME = os.getenv("HF_LOCAL_MODEL", "Qwen/Qwen3-4B")
-MAX_NEW_TOKENS = int(os.getenv("HF_LOCAL_MAX_NEW_TOKENS", "1400"))
+MAX_NEW_TOKENS = int(os.getenv("HF_LOCAL_MAX_NEW_TOKENS", "700"))
+MAX_INPUT_TOKENS = int(os.getenv("HF_LOCAL_MAX_INPUT_TOKENS", "1024"))
 
 _tokenizer = None
 _model = None
@@ -79,20 +90,33 @@ class TeacherResult:
 
 
 def _load_model():
-    """Load Qwen once and keep it cached for the lifetime of the Space."""
+    """Load Qwen once, using low-memory loading and the best available device."""
     global _tokenizer, _model
     if _tokenizer is not None and _model is not None:
         return _tokenizer, _model
     if AutoTokenizer is None or AutoModelForCausalLM is None or torch is None:
         raise RuntimeError("transformers/torch are not installed")
 
-    _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    kwargs = {"torch_dtype": "auto"}
+    _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+
     if torch.cuda.is_available():
-        kwargs["device_map"] = "auto"
-    _model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, **kwargs)
-    if not torch.cuda.is_available():
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        _model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME,
+            torch_dtype=dtype,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+    else:
+        # CPU Basic has 16 GB RAM; BF16 keeps the 4B model substantially smaller
+        # than FP32. Generation is slower, but remains possible without an API.
+        _model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+        )
         _model.to("cpu")
+
     _model.eval()
     return _tokenizer, _model
 
@@ -129,6 +153,7 @@ class AITeacher:
             pattern=sentence,
         )
 
+    @spaces.GPU(duration=180)
     def analyze(self, sentence: str) -> TeacherResult:
         sentence = (sentence or "").strip()
         if not sentence:
@@ -159,7 +184,12 @@ class AITeacher:
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
-            inputs = tokenizer([text], return_tensors="pt")
+            inputs = tokenizer(
+                [text],
+                return_tensors="pt",
+                truncation=True,
+                max_length=MAX_INPUT_TOKENS,
+            )
             device = next(model.parameters()).device
             inputs = {k: v.to(device) for k, v in inputs.items()}
             with torch.inference_mode():
@@ -168,6 +198,7 @@ class AITeacher:
                     max_new_tokens=MAX_NEW_TOKENS,
                     do_sample=False,
                     repetition_penalty=1.05,
+                    use_cache=True,
                 )
             generated = outputs[0][inputs["input_ids"].shape[-1]:]
             raw = tokenizer.decode(generated, skip_special_tokens=True).strip()
