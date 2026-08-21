@@ -1,304 +1,76 @@
+"""English Learning Lab — final consolidated entrypoint.
+Listening → Shadowing → Local Qwen3-4B AI Teacher → Quiz → Progress.
+No OpenAI, DeepSeek, Qwen API, or external AI inference service.
+"""
 import os
-import re
-import sqlite3
-import html
-import difflib
-from pathlib import Path
-
 import gradio as gr
-import yt_dlp
+from core import APP_NAME, DEFAULT_PLAYLIST, load_library, load_lesson, select_sentence, translate, check_speaking, stats
+from ai.teacher import AITeacher
+from learning.progress import save_teacher_result, learning_stats
 
-try:
-    from youtube_transcript_api import YouTubeTranscriptApi
-except Exception:
-    YouTubeTranscriptApi = None
+def analyze_teacher(sentence, idx):
+    if not sentence: return "⚠️ Chưa có câu để phân tích.", {}, learning_stats()
+    result=AITeacher().analyze(sentence); save_teacher_result(None,int(idx or 0),result)
+    return result.markdown(),result.quiz or {},learning_stats()
 
-try:
-    from faster_whisper import WhisperModel
-except Exception:
-    WhisperModel = None
+def quiz_options(q):
+    if not q or not q.get("question"): return "Chưa có quiz. Hãy chạy AI Teacher.",gr.update(choices=[]),""
+    options=q.get("options") or []
+    return f"### 📝 {q['question']}",gr.update(choices=[f"{chr(65+i)}. {x}" for i,x in enumerate(options[:4])]),q.get("answer","A")
 
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
+def grade_quiz(choice,answer,q):
+    if not choice or not answer or not q:return "⚠️ Chọn một đáp án."
+    letter=choice.split(".",1)[0].strip().upper(); ok=letter==answer.strip().upper()
+    return ("## ✅ Correct!" if ok else f"## ❌ Chưa đúng — đáp án **{answer}**")+f"\n\n{q.get('explanation','')}"
 
-from speech.scoring import SpokenWord, score_speech
+def next_index(idx,ss): return min(len(ss)-1,int(idx or 0)+1) if ss else 0
+def prev_index(idx,ss): return max(0,int(idx or 0)-1) if ss else 0
+def session_status(idx,ss):
+    if not ss:return "Chưa có bài học."
+    i=max(0,min(int(idx or 0),len(ss)-1)); return f"### Câu {i+1} / {len(ss)} · {round((i+1)/len(ss)*100)}%"
 
-APP_NAME = "English Learning Lab"
-DEFAULT_PLAYLIST = "https://youtube.com/playlist?list=PLRDC-DZ_uWhpbeuja5CFDhkVVKElpRje7&si=pnXRrHKug8I319jg"
-DB_PATH = Path(os.getenv("ENGLISH_DB", "english_lab.db"))
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
-AI_KEY = os.getenv("AI_API_KEY", "")
-AI_BASE = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
-AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
+CSS=""".gradio-container{max-width:1180px!important}.hero{padding:22px;border-radius:22px;margin-bottom:14px;background:linear-gradient(135deg,#0f172a,#334155);color:white}.hero h1{margin:0;font-size:30px}.hero p{margin:5px 0 0;opacity:.82}.step{border:1px solid #e2e8f0;border-radius:18px;padding:18px;margin:8px 0}.sentence-main{font-size:26px;line-height:1.45;font-weight:600;padding:22px;border-radius:18px;border:1px solid #cbd5e1;min-height:100px}.player{position:relative;padding-top:56.25%;overflow:hidden;border-radius:18px;background:#000}.player iframe{position:absolute;inset:0;width:100%;height:100%;border:0}@media(max-width:700px){.gradio-container{padding:8px!important}.hero h1{font-size:24px}.sentence-main{font-size:21px}.step{padding:12px}}"""
 
-_whisper = None
-_current_video = None
+def main():
+    with gr.Blocks(title=f"{APP_NAME} V2.6",css=CSS,theme=gr.themes.Soft()) as ui:
+        library=gr.State([]); sentences=gr.State([]); quiz_state=gr.State({})
+        gr.HTML('<div class="hero"><h1>🇬🇧 English Learning Lab</h1><p>Listening · Shadowing · Speaking · Grammar · Vocabulary · Quiz · Progress</p></div>')
+        dashboard=gr.Markdown(stats()+" · "+learning_stats())
+        with gr.Tab("📚 Library"):
+            with gr.Row():
+                playlist=gr.Textbox(label="YouTube Playlist",value=DEFAULT_PLAYLIST,scale=8); import_btn=gr.Button("📥 Import",variant="primary",scale=2)
+            status=gr.Markdown(); video=gr.Dropdown(label="Chọn video",choices=[]); title=gr.Markdown(); player=gr.HTML(); transcript_status=gr.Markdown()
+            import_btn.click(load_library,playlist,[video,library,status,dashboard]); video.change(load_lesson,[video,library],[player,sentences,transcript_status,title])
+        with gr.Tab("🎯 Learning Session"):
+            session_progress=gr.Markdown("Chưa có bài học."); sentence_index=gr.Number(value=0,visible=False,elem_id="sentence_index")
+            current_sentence=gr.Markdown("<div class='sentence-main'>Chọn video để bắt đầu.</div>"); current_text=gr.State(""); timestamp=gr.Markdown()
+            with gr.Row(): prev_btn=gr.Button("◀ Câu trước"); next_btn=gr.Button("Câu tiếp ▶",variant="primary")
+            with gr.Group(elem_classes="step"):
+                gr.Markdown("### 1️⃣ Listen — Nghe trước"); hide_transcript=gr.Checkbox(label="🔒 Ẩn transcript",value=True); reveal=gr.Button("👁 Hiện câu"); transcript_reveal=gr.Markdown("Transcript đang ẩn.")
+            with gr.Group(elem_classes="step"):
+                gr.Markdown("### 2️⃣ Translate"); translate_btn=gr.Button("🇻🇳 Dịch câu"); translation=gr.Markdown()
+            with gr.Group(elem_classes="step"):
+                gr.Markdown("### 3️⃣ Shadowing — Đọc theo"); audio=gr.Audio(sources=["microphone"],type="filepath",label="🎙 Đọc câu"); speak_btn=gr.Button("🎯 Chấm phát âm",variant="primary"); speaking=gr.Markdown(); recognized=gr.Textbox(label="AI nhận được",interactive=False)
+            with gr.Group(elem_classes="step"):
+                gr.Markdown("### 4️⃣ AI Teacher — Qwen3-4B local"); teacher_btn=gr.Button("🧑‍🏫 Phân tích câu",variant="primary"); teacher=gr.Markdown(); teacher_progress=gr.Markdown()
+            with gr.Group(elem_classes="step"):
+                gr.Markdown("### 5️⃣ Quick Quiz"); quiz_question=gr.Markdown("Quiz sẽ xuất hiện sau AI Teacher."); quiz_choice=gr.Radio(label="Chọn đáp án",choices=[]); quiz_answer=gr.State(""); quiz_btn=gr.Button("✅ Kiểm tra"); quiz_result=gr.Markdown()
+            complete=gr.Button("☑️ Hoàn thành câu & sang câu tiếp",variant="primary")
+        with gr.Tab("📊 Progress"):
+            progress=gr.Markdown(stats()+" · "+learning_stats()); refresh=gr.Button("🔄 Refresh")
 
+        def current(i,ss):
+            text,info,st,idx=select_sentence(i,ss)
+            return f"<div class='sentence-main'>{text or 'Chưa có câu.'}</div>",text,f"⏱️ {st}",session_status(idx,ss),idx
+        sentence_index.change(current,[sentence_index,sentences],[current_sentence,current_text,timestamp,session_progress,sentence_index])
+        next_btn.click(next_index,[sentence_index,sentences],sentence_index); prev_btn.click(prev_index,[sentence_index,sentences],sentence_index)
+        reveal.click(lambda hidden,text:text if not hidden else "🔒 Transcript đang ẩn. Hãy nghe và tự nhớ câu trước.",[hide_transcript,current_text],transcript_reveal)
+        hide_transcript.change(lambda hidden:"🔒 Transcript đang ẩn." if hidden else "👁 Transcript đã bật.",hide_transcript,transcript_reveal)
+        translate_btn.click(translate,current_text,translation); speak_btn.click(check_speaking,[current_text,audio,sentence_index],[speaking,recognized])
+        teacher_btn.click(analyze_teacher,[current_text,sentence_index],[teacher,quiz_state,teacher_progress]).then(quiz_options,quiz_state,[quiz_question,quiz_choice,quiz_answer])
+        quiz_btn.click(grade_quiz,[quiz_choice,quiz_answer,quiz_state],quiz_result)
+        complete.click(next_index,[sentence_index,sentences],sentence_index).then(lambda:stats()+" · "+learning_stats(),outputs=dashboard)
+        refresh.click(lambda:stats()+" · "+learning_stats(),outputs=progress)
+    ui.launch(server_name="0.0.0.0",server_port=int(os.getenv("PORT","7860")))
 
-def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-def init_db():
-    with db() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS videos (
-            video_id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL,
-            thumbnail TEXT, duration INTEGER DEFAULT 0, status TEXT DEFAULT 'new',
-            last_sentence INTEGER DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS sentences (
-            video_id TEXT NOT NULL, sentence_index INTEGER NOT NULL, text TEXT NOT NULL,
-            start REAL NOT NULL, end_time REAL NOT NULL,
-            PRIMARY KEY(video_id, sentence_index)
-        );
-        CREATE TABLE IF NOT EXISTS practice (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, video_id TEXT, sentence_index INTEGER,
-            score REAL, similarity REAL, completeness REAL, fluency REAL, wpm REAL,
-            recognized TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        """)
-
-
-init_db()
-
-
-def clean(text):
-    return re.sub(r"\s+", " ", (text or "").replace("\n", " ")).strip()
-
-
-def stamp(seconds):
-    n = max(0, int(seconds or 0))
-    return f"{n//60:02d}:{n%60:02d}"
-
-
-def playlist(url):
-    opts = {"quiet": True, "extract_flat": True, "skip_download": True, "ignoreerrors": True}
-    out = []
-    try:
-        with yt_dlp.YoutubeDL(opts) as y:
-            info = y.extract_info(url, download=False)
-        for e in (info or {}).get("entries", [])[:150]:
-            if not e or not e.get("id"):
-                continue
-            vid = e["id"]
-            item = {
-                "id": vid, "title": e.get("title") or vid,
-                "url": f"https://www.youtube.com/watch?v={vid}",
-                "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                "duration": e.get("duration") or 0,
-            }
-            out.append(item)
-            with db() as c:
-                c.execute("""INSERT INTO videos(video_id,title,url,thumbnail,duration)
-                VALUES(?,?,?,?,?) ON CONFLICT(video_id) DO UPDATE SET
-                title=excluded.title,url=excluded.url,thumbnail=excluded.thumbnail,
-                duration=excluded.duration,updated_at=CURRENT_TIMESTAMP""",
-                (vid, item["title"], item["url"], item["thumbnail"], item["duration"]))
-        return out, f"✅ {len(out)} video được đưa vào thư viện."
-    except Exception as e:
-        return [], f"❌ Playlist error: {e}"
-
-
-def transcript_for(vid):
-    if not vid or YouTubeTranscriptApi is None:
-        return [], "❌ Transcript engine chưa sẵn sàng."
-    try:
-        api = YouTubeTranscriptApi()
-        raw = None
-        try:
-            raw = api.fetch(vid, languages=["en", "en-US", "en-GB"])
-        except Exception:
-            try:
-                for t in api.list(vid):
-                    if str(getattr(t, "language_code", "")).startswith("en"):
-                        raw = t.fetch(); break
-            except Exception:
-                pass
-        if raw is None:
-            return [], "❌ Video không có English transcript khả dụng."
-        pieces = []
-        for x in raw:
-            text = clean(getattr(x, "text", ""))
-            if text:
-                start = float(getattr(x, "start", 0)); end = start + float(getattr(x, "duration", 0))
-                pieces.append((text, start, end))
-        result, buf, start, end = [], [], None, None
-        for text, s, e in pieces:
-            start = s if start is None else start; end = e; buf.append(text)
-            joined = clean(" ".join(buf))
-            if re.search(r"[.!?…]$", joined) or len(joined) >= 180:
-                result.append({"index": len(result), "text": joined, "start": start, "end": end})
-                buf, start, end = [], None, None
-        if buf:
-            result.append({"index": len(result), "text": clean(" ".join(buf)), "start": start or 0, "end": end or 0})
-        with db() as c:
-            c.execute("DELETE FROM sentences WHERE video_id=?", (vid,))
-            c.executemany("INSERT INTO sentences(video_id,sentence_index,text,start,end_time) VALUES(?,?,?,?,?)",
-                          [(vid, x["index"], x["text"], x["start"], x["end"]) for x in result])
-            c.execute("UPDATE videos SET status='in-progress',updated_at=CURRENT_TIMESTAMP WHERE video_id=?", (vid,))
-        return result, f"✅ {len(result)} câu transcript."
-    except Exception as e:
-        return [], f"❌ Transcript error: {e}"
-
-
-def cards(sentences, visible=True, focus=None):
-    if not sentences:
-        return '<div class="empty">Chưa có transcript.</div>'
-    if not visible:
-        return '<div class="hidden">🔒 Transcript đang ẩn<br><small>Hãy nghe và tự nhớ câu.</small></div>'
-    rows = sentences if focus is None else ([sentences[focus]] if 0 <= focus < len(sentences) else [])
-    parts = ['<div class="transcript">']
-    for s in rows:
-        parts.append(f'<button class="sentence" onclick="englishLabSelect({s["index"]})">'
-                     f'<span class="num">{s["index"]+1}</span><span><small>{stamp(s["start"])}</small><br>{html.escape(s["text"])}</span></button>')
-    return ''.join(parts) + '</div>'
-
-
-def load_library(url):
-    items, status = playlist(url)
-    choices = [f"{i+1:03d} | {x['title']}" for i, x in enumerate(items)]
-    return gr.update(choices=choices, value=choices[0] if choices else None), items, status, stats()
-
-
-def load_lesson(choice, items):
-    global _current_video
-    if not choice or not items:
-        return "", [], "❌ Chưa chọn video.", ""
-    i = int(choice.split("|")[0]) - 1
-    _current_video = items[i]
-    sentences, status = transcript_for(_current_video["id"])
-    embed = f'<div class="player"><iframe src="https://www.youtube.com/embed/{_current_video["id"]}?enablejsapi=1&rel=0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>'
-    return embed, sentences, status, f"### {_current_video['title']}"
-
-
-def select_sentence(idx, sentences):
-    if not sentences:
-        return "", "", "", 0
-    i = max(0, min(int(idx or 0), len(sentences)-1)); s = sentences[i]
-    if _current_video:
-        with db() as c:
-            c.execute("UPDATE videos SET last_sentence=?,updated_at=CURRENT_TIMESTAMP WHERE video_id=?", (i, _current_video["id"]))
-    return s["text"], f"**Câu {i+1} / {len(sentences)}**", stamp(s["start"]), i
-
-
-def ai(prompt):
-    if not AI_KEY or OpenAI is None:
-        return "⚠️ Chưa cấu hình AI_API_KEY trong Hugging Face Secrets."
-    try:
-        client = OpenAI(api_key=AI_KEY, base_url=AI_BASE)
-        r = client.chat.completions.create(model=AI_MODEL, temperature=0.2, messages=[
-            {"role":"system","content":"Bạn là giáo viên tiếng Anh chuyên dạy người Việt. Giải thích rõ, ngắn gọn và có ví dụ."},
-            {"role":"user","content":prompt}])
-        return r.choices[0].message.content
-    except Exception as e:
-        return f"❌ AI error: {e}"
-
-
-def explain(sentence):
-    return ai(f'''Phân tích câu: "{sentence}". Trình bày: nghĩa tự nhiên; cấu trúc; chủ ngữ/động từ; thì; từ vựng; collocation/phrasal verb; phát âm nối âm; pattern; một mini quiz.''')
-
-
-def translate(sentence):
-    return ai(f'Dịch câu sau sang tiếng Việt tự nhiên và giải thích 2 cụm từ quan trọng: {sentence}')
-
-
-def get_whisper():
-    global _whisper
-    if WhisperModel is None:
-        return None
-    if _whisper is None:
-        _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-    return _whisper
-
-
-def check_speaking(target, audio, idx):
-    if not target: return "❌ Chưa chọn câu.", ""
-    if not audio: return "❌ Hãy ghi âm trước.", ""
-    model = get_whisper()
-    if model is None: return "❌ faster-whisper chưa cài đặt.", ""
-    try:
-        segments, _ = model.transcribe(audio, language="en", beam_size=5, word_timestamps=True)
-        spoken_segments = list(segments)
-        spoken = clean(" ".join(s.text for s in spoken_segments))
-        spoken_words = []
-        for seg in spoken_segments:
-            for w in (getattr(seg, "words", None) or []):
-                spoken_words.append(SpokenWord(clean(w.word), float(w.start or 0), float(w.end or 0)))
-        duration = 0.0
-        if spoken_words:
-            duration = max(0.0, spoken_words[-1].end - spoken_words[0].start)
-        elif spoken_segments:
-            duration = max(0.0, float(spoken_segments[-1].end) - float(spoken_segments[0].start))
-        result = score_speech(target, spoken, spoken_words, duration)
-        with db() as c:
-            vid = _current_video["id"] if _current_video else None
-            c.execute("INSERT INTO practice(video_id,sentence_index,score,similarity,completeness,fluency,wpm,recognized) VALUES(?,?,?,?,?,?,?,?)",
-                      (vid, int(idx or 0), result["overall"], result["similarity"], result["completeness"], result["fluency"], result["wpm"], spoken))
-        missing = ', '.join(result['missing']) or 'Không phát hiện từ bị thiếu rõ ràng.'
-        review = ', '.join(result['review']) or 'Không có từ cần xem lại.'
-        extra = ', '.join(result['extra']) or 'Không có.'
-        out = f'''### 🎤 Pronunciation / Shadowing\n\n**Overall: {result['overall']}/100**\n\n| Metric | Score |\n|---|---:|\n| Recognition similarity | {result['similarity']}/100 |\n| Completeness | {result['completeness']}/100 |\n| Fluency proxy | {result['fluency']}/100 |\n| Speaking speed | {result['wpm']} WPM |\n\n**Target:** {target}\n\n**You said:** {spoken}\n\n**⚠️ Missing:** {missing}\n\n**🔎 Review:** {review}\n\n**➕ Extra:** {extra}\n\n> Đây là điểm shadowing dựa trên speech-to-text, alignment và tốc độ nói; chưa phải điểm âm vị/giọng chuẩn như hệ thống chuyên dụng.'''
-        return out, spoken
-    except Exception as e:
-        return f"❌ Speech error: {e}", ""
-
-
-def stats():
-    with db() as c:
-        v = c.execute("SELECT COUNT(*) n FROM videos").fetchone()["n"]
-        s = c.execute("SELECT COUNT(*) n FROM sentences").fetchone()["n"]
-        p = c.execute("SELECT COUNT(*) n FROM practice").fetchone()["n"]
-        a = c.execute("SELECT COALESCE(AVG(score),0) n FROM practice").fetchone()["n"]
-    return f"**{v}** videos  ·  **{s}** sentences  ·  **{p}** practice sessions  ·  **{a:.0f}** avg speaking score"
-
-
-CSS = '''
-.gradio-container{max-width:1200px!important}.hero{padding:24px;border-radius:20px;background:linear-gradient(135deg,#111827,#334155);color:white;margin-bottom:16px}.hero h1{margin:0 0 6px;font-size:32px}.hero p{margin:0;opacity:.82}.player{position:relative;padding-top:56.25%;overflow:hidden;border-radius:18px;background:#000}.player iframe{position:absolute;inset:0;width:100%;height:100%;border:0}.transcript{max-height:510px;overflow:auto;padding:4px}.sentence{width:100%;display:flex;gap:12px;text-align:left;border:1px solid #e5e7eb;border-radius:14px;padding:12px;margin:7px 0;background:transparent;cursor:pointer}.sentence:hover{border-color:#94a3b8}.num{min-width:30px;font-weight:700}.sentence small{opacity:.55}.hidden,.empty{padding:42px 18px;text-align:center;border:1px dashed #94a3b8;border-radius:16px}
-'''
-
-JS = '''function englishLabSelect(i){const el=document.querySelector('#sentence_index input');if(!el)return;el.value=i;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}'''
-
-with gr.Blocks(title=APP_NAME, css=CSS, js=JS, theme=gr.themes.Soft()) as app:
-    library_state = gr.State([]); sentence_state = gr.State([])
-    gr.HTML('<div class="hero"><h1>🇬🇧 English Learning Lab</h1><p>Listen · Shadow · Speak · Grammar · Vocabulary · Progress</p></div>')
-    dashboard = gr.Markdown(stats())
-    with gr.Tab("🎧 Listening"):
-        with gr.Row():
-            playlist_url=gr.Textbox(label="YouTube Playlist",value=DEFAULT_PLAYLIST,scale=8)
-            load_btn=gr.Button("📥 Import",variant="primary",scale=2)
-        library_status=gr.Markdown(); video_choice=gr.Dropdown(label="Video Library",choices=[]); video_title=gr.Markdown(); video_html=gr.HTML(); transcript_status=gr.Markdown()
-        with gr.Row():
-            show=gr.Checkbox(label="👁 Show transcript",value=True); focus=gr.Checkbox(label="🎯 Focus current sentence",value=False)
-        transcript_html=gr.HTML(); sentence_index=gr.Number(value=0,visible=False,elem_id="sentence_index")
-        with gr.Row():
-            sentence_text=gr.Textbox(label="Current sentence",lines=3,interactive=False,scale=7); sentence_info=gr.Markdown(scale=2)
-        sentence_time=gr.Textbox(label="Timestamp",interactive=False)
-        with gr.Row():
-            prev_btn=gr.Button("◀ Previous"); next_btn=gr.Button("Next ▶"); translate_btn=gr.Button("🇻🇳 Translate"); grammar_btn=gr.Button("📚 Grammar",variant="primary")
-        translate_out=gr.Markdown(); grammar_out=gr.Markdown()
-    with gr.Tab("🎤 Speaking"):
-        gr.Markdown("### V2.2 Shadowing Engine\nNghe → ẩn transcript → đọc → ghi âm → phân tích alignment → luyện lại.")
-        audio=gr.Audio(sources=["microphone"],type="filepath",label="🎙 Record your voice")
-        check_btn=gr.Button("🎯 Analyze pronunciation",variant="primary"); speaking_out=gr.Markdown(); recognized=gr.Textbox(label="Speech recognition",interactive=False)
-    with gr.Tab("📊 Progress"):
-        progress=gr.Markdown(stats()); refresh=gr.Button("🔄 Refresh"); gr.Markdown("**V2.2 implemented:** word timestamps, alignment, completeness, fluency proxy, WPM and practice history. Next: V2.3 AI Teacher + generated exercises.")
-
-    load_btn.click(load_library,playlist_url,[video_choice,library_state,library_status,dashboard]).then(lambda:stats(),outputs=progress)
-    video_choice.change(load_lesson,[video_choice,library_state],[video_html,sentence_state,transcript_status,video_title]).then(lambda s:cards(s,True),sentence_state,transcript_html)
-    show.change(lambda s,v,f:cards(s,v,None if not f else 0),[sentence_state,show,focus],transcript_html)
-    focus.change(lambda s,v,f:cards(s,v,None if not f else 0),[sentence_state,show,focus],transcript_html)
-    sentence_index.change(select_sentence,[sentence_index,sentence_state],[sentence_text,sentence_info,sentence_time,sentence_index])
-    prev_btn.click(lambda i,s:max(0,int(i or 0)-1),[sentence_index,sentence_state],sentence_index)
-    next_btn.click(lambda i,s:min(len(s)-1,int(i or 0)+1) if s else 0,[sentence_index,sentence_state],sentence_index)
-    translate_btn.click(translate,sentence_text,translate_out); grammar_btn.click(explain,sentence_text,grammar_out)
-    check_btn.click(check_speaking,[sentence_text,audio,sentence_index],[speaking_out,recognized]).then(lambda:stats(),outputs=dashboard).then(lambda:stats(),outputs=progress)
-    refresh.click(stats,outputs=progress)
-
-if __name__ == "__main__":
-    app.launch(server_name="0.0.0.0",server_port=int(os.getenv("PORT","7860")))
+if __name__=="__main__": main()
