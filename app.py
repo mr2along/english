@@ -1,7 +1,4 @@
-"""English Learning Lab — adaptive production entrypoint.
-Listening → Shadowing → Local Qwen → Quiz → Progress.
-Automatically adapts to CPU Basic, regular GPU, or ZeroGPU.
-"""
+"""English Learning Lab — adaptive production entrypoint."""
 import os
 import gradio as gr
 from core import APP_NAME, DEFAULT_PLAYLIST, load_library, load_lesson, select_sentence, translate, check_speaking, stats, runtime_status
@@ -68,6 +65,6 @@ def main():
         quiz_btn.click(grade_quiz,[quiz_choice,quiz_answer,quiz_state],quiz_result)
         complete.click(next_index,[sentence_index,sentences],sentence_index).then(lambda:stats()+" · "+learning_stats(),outputs=dashboard)
         refresh.click(lambda:stats()+" · "+learning_stats(),outputs=progress)
-    ui.launch(server_name="0.0.0.0",server_port=int(os.getenv("PORT","7860")))
+    ui.launch(server_name="0.0.0.0",server_port=int(os.getenv("PORT","7860")),ssr_mode=False)
 
 if __name__=="__main__": main()
