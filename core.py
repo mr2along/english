@@ -2,6 +2,8 @@
 from __future__ import annotations
 import os,re,sqlite3,json,traceback
 from pathlib import Path
+from urllib.parse import urlparse,parse_qs
+import requests
 import gradio as gr
 import yt_dlp
 try:
@@ -15,6 +17,13 @@ except Exception: torch=None
 from speech.scoring import SpokenWord,score_speech
 from ai.teacher import AITeacher,hardware_info
 APP_NAME="English Learning Lab"; DEFAULT_PLAYLIST="https://youtube.com/playlist?list=PLRDC-DZ_uWhpbeuja5CFDhkVVKElpRje7"; DB_PATH=Path(os.getenv("ENGLISH_DB","english_lab.db")); WHISPER_MODEL=os.getenv("WHISPER_MODEL","small"); _whisper=None; _current_video=None
+# Public instances are only a fallback. Operators can supply their own rotating
+# proxy/API nodes with INVIDIOUS_INSTANCES (comma-separated HTTPS base URLs).
+DEFAULT_INVIDIOUS_INSTANCES=(
+ "https://inv.nadeko.net",
+ "https://invidious.nerdvpn.de",
+ "https://yt.chocolatemoo53.com",
+)
 
 def db():
  c=sqlite3.connect(DB_PATH); c.row_factory=sqlite3.Row; c.execute("PRAGMA journal_mode=WAL"); return c
@@ -32,31 +41,60 @@ def _youtube_opts(impersonate=True):
  if os.getenv("YT_DLP_NO_CHECK_CERTIFICATE","0").lower() in {"1","true","yes"}:o["nocheckcertificate"]=True
  return o
 
+def _playlist_id(url):
+ try:return parse_qs(urlparse(url).query).get("list",[None])[0]
+ except Exception:return None
+
+def _proxy_instances():
+ raw=os.getenv("INVIDIOUS_INSTANCES","").strip()
+ values=[x.strip().rstrip("/") for x in raw.split(",") if x.strip()] if raw else list(DEFAULT_INVIDIOUS_INSTANCES)
+ # Prefer a user-supplied/private proxy, then public fallback nodes.
+ return list(dict.fromkeys(values))
+
+def _proxy_playlist(url):
+ plid=_playlist_id(url)
+ if not plid:raise RuntimeError("Không tìm thấy playlist ID trong URL")
+ errors=[]
+ headers={"User-Agent":"EnglishLearningLab/2.7","Accept":"application/json"}
+ for base in _proxy_instances():
+  try:
+   r=requests.get(f"{base}/api/v1/playlists/{plid}",params={"page":1},headers=headers,timeout=(8,20),allow_redirects=True)
+   r.raise_for_status(); data=r.json()
+   videos=data.get("videos") or []
+   if not videos:raise RuntimeError("proxy trả về playlist nhưng không có video")
+   return [{"id":str(v.get("videoId")),"title":v.get("title") or str(v.get("videoId")),"url":f"https://www.youtube.com/watch?v={v.get('videoId')}","thumbnail":((v.get("videoThumbnails") or [{}])[-1].get("url") or f"https://i.ytimg.com/vi/{v.get('videoId')}/hqdefault.jpg"),"duration":v.get("lengthSeconds") or 0} for v in videos if re.fullmatch(r"[A-Za-z0-9_-]{11}",str(v.get("videoId") or ""))]
+  except Exception as e:errors.append(f"{base}: {type(e).__name__}: {e}")
+ raise RuntimeError("Proxy playlist thất bại: " + " | ".join(errors))
+
 def _extract_playlist(url):
  errors=[]
+ # Direct YouTube remains the fastest path when the Space network allows it.
  for imp in (True,False):
   try:
    with yt_dlp.YoutubeDL(_youtube_opts(imp)) as y:return y.extract_info(url,download=False)
-  except (AssertionError,Exception) as e:errors.append(f"{'curl_cffi' if imp else 'urllib'}: {type(e).__name__}: {e}")
+  except Exception as e:errors.append(f"{'curl_cffi' if imp else 'urllib'}: {type(e).__name__}: {e}")
+ # The documented Invidious API provides /api/v1/playlists/:plid and is used
+ # only after direct YouTube access fails. This changes the network node rather
+ # than disabling TLS verification.
+ try:return {"entries":_proxy_playlist(url),"_proxy":True}
+ except Exception as e:errors.append(str(e))
  raise RuntimeError("; ".join(errors))
 
 def playlist(url):
  try:
-  info=_extract_playlist(url); out=[]
-  if not info:return [],"❌ YouTube không trả dữ liệu playlist."
-  entries=info.get("entries") or []
+  info=_extract_playlist(url);out=[];entries=info.get("entries") or []
   for e in entries[:150]:
    if not e:continue
    vid=e.get("id") or e.get("url")
    if not vid:continue
    vid=str(vid).split("?")[0].split("&")[0]
    if not re.fullmatch(r"[A-Za-z0-9_-]{11}",vid):continue
-   title=e.get("title") or vid; item={"id":vid,"title":title,"url":f"https://www.youtube.com/watch?v={vid}","thumbnail":f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg","duration":e.get("duration") or 0};out.append(item)
+   title=e.get("title") or vid;item={"id":vid,"title":title,"url":f"https://www.youtube.com/watch?v={vid}","thumbnail":e.get("thumbnail") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg","duration":e.get("duration") or 0};out.append(item)
    with db() as c:c.execute("INSERT INTO videos(video_id,title,url,thumbnail,duration) VALUES(?,?,?,?,?) ON CONFLICT(video_id) DO UPDATE SET title=excluded.title,url=excluded.url,thumbnail=excluded.thumbnail,duration=excluded.duration,updated_at=CURRENT_TIMESTAMP",(vid,title,item["url"],item["thumbnail"],item["duration"]))
   if not out:return [],"❌ Playlist đã được kết nối nhưng không tìm thấy video ID hợp lệ."
-  return out,f"✅ {len(out)} video được đưa vào thư viện."
- except Exception as e:
-  return [],f"❌ Playlist error: {type(e).__name__}: {e}"
+  source="proxy fallback" if info.get("_proxy") else "YouTube"
+  return out,f"✅ {len(out)} video được đưa vào thư viện · nguồn: {source}."
+ except Exception as e:return [],f"❌ Playlist error: {type(e).__name__}: {e}"
 
 def transcript_for(vid):
  if not vid or YouTubeTranscriptApi is None:return [],"❌ Transcript engine chưa sẵn sàng."
