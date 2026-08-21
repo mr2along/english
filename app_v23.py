@@ -9,12 +9,9 @@ import gradio as gr
 from app import (
     APP_NAME, DEFAULT_PLAYLIST, cards, load_library, load_lesson,
     select_sentence, translate, check_speaking, stats,
-    sentence_state if False else None,
 )
 from ai.teacher import AITeacher
 
-# Importing app.py creates the stable V2.2 UI but does not launch it.
-# We intentionally build a clean V2.3 shell here.
 
 def teacher_markdown(sentence):
     return AITeacher().analyze(sentence).markdown()
