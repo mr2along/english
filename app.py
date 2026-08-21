@@ -24,6 +24,18 @@ def session_status(idx,ss):
 def import_library(url):
     video_update,items,status,dash=load_library(url); choices=video_update.get("choices",[]); value=video_update.get("value")
     return video_update,gr.update(choices=choices,value=value),items,status,dash
+
+def render_sentence_zero(ss):
+    selected=select_sentence(0,ss)
+    if not ss:
+        return "","","",session_status(0,ss),0
+    text,raw,timestamp,idx=selected
+    return text,raw,timestamp,session_status(0,ss),idx
+
+def render_sentence(i,ss):
+    text,raw,timestamp,idx=select_sentence(i,ss)
+    return text,raw,timestamp,session_status(i,ss),idx
+
 CSS=""".gradio-container{max-width:1180px!important}.hero{padding:22px;border-radius:22px;margin-bottom:14px;background:linear-gradient(135deg,#0f172a,#334155);color:white}.hero h1{margin:0;font-size:30px}.hero p{margin:5px 0 0;opacity:.82}.runtime{padding:10px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.step{border:1px solid #e2e8f0;border-radius:18px;padding:18px;margin:8px 0}.sentence-main{font-size:26px;line-height:1.45;font-weight:600;padding:22px;border-radius:18px;border:1px solid #cbd5e1;min-height:100px}.player{position:relative;padding-top:56.25%;overflow:hidden;border-radius:18px;background:#000}.player iframe{position:absolute;inset:0;width:100%;height:100%;border:0}@media(max-width:700px){.gradio-container{padding:8px!important}.hero h1{font-size:24px}.sentence-main{font-size:21px}.step{padding:12px}}"""
 def main():
     with gr.Blocks(title=f"{APP_NAME} V2.7",css=CSS,theme=gr.themes.Soft()) as ui:
@@ -53,13 +65,9 @@ def main():
         with gr.Tab("📊 Progress"):
             progress=gr.Markdown(stats()+" · "+learning_stats()); refresh=gr.Button("🔄 Refresh")
         import_btn.click(import_library,playlist,[video,session_video,library,status,dashboard])
-        # Load from either selector, then explicitly populate the session state and reset to sentence 0.
-        video.change(load_lesson,[video,library],[player,sentences,transcript_status,title]).then(lambda v:gr.update(choices=[v] if v else [],value=v),video,session_video).then(lambda:0,outputs=sentence_index)
-        session_video.change(load_lesson,[session_video,library],[session_player,sentences,transcript_status,title]).then(lambda:0,outputs=sentence_index)
-        # Critical fix: load_lesson returns sentences asynchronously; render sentence 0 from that returned list.
-        session_video.change(lambda ss: (*select_sentence(0,ss),session_status(0,ss),0),sentences,[current_sentence,current_text,timestamp,session_progress,sentence_index])
-        video.change(lambda ss: (*select_sentence(0,ss),session_status(0,ss),0),sentences,[current_sentence,current_text,timestamp,session_progress,sentence_index])
-        sentence_index.change(lambda i,ss:(*select_sentence(i,ss),session_status(i,ss),i),[sentence_index,sentences],[current_sentence,current_text,timestamp,session_progress,sentence_index])
+        video.change(load_lesson,[video,library],[player,sentences,transcript_status,title]).then(lambda v:gr.update(choices=[v] if v else [],value=v),video,session_video).then(render_sentence_zero,sentences,[current_sentence,current_text,timestamp,session_progress,sentence_index])
+        session_video.change(load_lesson,[session_video,library],[session_player,sentences,transcript_status,title]).then(render_sentence_zero,sentences,[current_sentence,current_text,timestamp,session_progress,sentence_index])
+        sentence_index.change(render_sentence,[sentence_index,sentences],[current_sentence,current_text,timestamp,session_progress,sentence_index])
         next_btn.click(next_index,[sentence_index,sentences],sentence_index); prev_btn.click(prev_index,[sentence_index,sentences],sentence_index)
         reveal.click(lambda hidden,text:text if not hidden else "🔒 Transcript đang ẩn. Hãy nghe và tự nhớ câu trước.",[hide_transcript,current_text],transcript_reveal)
         hide_transcript.change(lambda hidden:"🔒 Transcript đang ẩn." if hidden else "👁 Transcript đã bật.",hide_transcript,transcript_reveal)
