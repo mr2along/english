@@ -1,29 +1,24 @@
 """English Learning Lab shared core."""
 from __future__ import annotations
-import os,re,sqlite3,json,traceback
+import os,re,sqlite3
 from pathlib import Path
 from urllib.parse import urlparse,parse_qs
 import requests
 import gradio as gr
 import yt_dlp
-try:
- from youtube_transcript_api import YouTubeTranscriptApi
+try: from youtube_transcript_api import YouTubeTranscriptApi
 except Exception: YouTubeTranscriptApi=None
-try:
- from faster_whisper import WhisperModel
+try: from faster_whisper import WhisperModel
 except Exception: WhisperModel=None
 try: import torch
 except Exception: torch=None
 from speech.scoring import SpokenWord,score_speech
 from ai.teacher import AITeacher,hardware_info
 APP_NAME="English Learning Lab"; DEFAULT_PLAYLIST="https://youtube.com/playlist?list=PLRDC-DZ_uWhpbeuja5CFDhkVVKElpRje7"; DB_PATH=Path(os.getenv("ENGLISH_DB","english_lab.db")); WHISPER_MODEL=os.getenv("WHISPER_MODEL","small"); _whisper=None; _current_video=None
-# Public instances are only a fallback. Operators can supply their own rotating
-# proxy/API nodes with INVIDIOUS_INSTANCES (comma-separated HTTPS base URLs).
-DEFAULT_INVIDIOUS_INSTANCES=(
- "https://inv.nadeko.net",
- "https://invidious.nerdvpn.de",
- "https://yt.chocolatemoo53.com",
-)
+# The Space has a network path that intermittently resets YouTube TLS.  The
+# documented Invidious public list is therefore the primary metadata route;
+# direct yt-dlp is opt-in fallback, not the first request.
+DEFAULT_INVIDIOUS_INSTANCES=("https://inv.nadeko.net","https://invidious.nerdvpn.de","https://yt.chocolatemoo53.com","https://invidious.tiekoetter.com","https://invidious.f5.si")
 
 def db():
  c=sqlite3.connect(DB_PATH); c.row_factory=sqlite3.Row; c.execute("PRAGMA journal_mode=WAL"); return c
@@ -35,67 +30,65 @@ def clean(x):return re.sub(r"\s+"," ",(x or "").replace("\n"," ")).strip()
 def stamp(s):n=max(0,int(s or 0));return f"{n//60:02d}:{n%60:02d}"
 def runtime_status():
  i=hardware_info();return f"**Hardware:** `{i['mode']}` · **GPU:** {i['gpu']} · **VRAM:** {i['vram_gb']} GB · **RAM:** {i['ram_gb']} GB · **AI:** `{i.get('model','auto')}` · **Whisper:** `{WHISPER_MODEL}`"
-def _youtube_opts(impersonate=True):
- o={"quiet":True,"extract_flat":True,"skip_download":True,"ignoreerrors":False,"retries":5,"fragment_retries":5,"socket_timeout":30,"source_address":"0.0.0.0","http_headers":{"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36","Accept-Language":"en-US,en;q=0.9"},"noplaylist":False}
- if impersonate:o["impersonate"]="chrome"
- if os.getenv("YT_DLP_NO_CHECK_CERTIFICATE","0").lower() in {"1","true","yes"}:o["nocheckcertificate"]=True
- return o
-
 def _playlist_id(url):
  try:return parse_qs(urlparse(url).query).get("list",[None])[0]
  except Exception:return None
-
 def _proxy_instances():
- raw=os.getenv("INVIDIOUS_INSTANCES","").strip()
- values=[x.strip().rstrip("/") for x in raw.split(",") if x.strip()] if raw else list(DEFAULT_INVIDIOUS_INSTANCES)
- # Prefer a user-supplied/private proxy, then public fallback nodes.
- return list(dict.fromkeys(values))
-
+ raw=os.getenv("INVIDIOUS_INSTANCES","").strip(); values=[x.strip().rstrip("/") for x in raw.split(",") if x.strip()] if raw else list(DEFAULT_INVIDIOUS_INSTANCES); return list(dict.fromkeys(values))
 def _proxy_playlist(url):
  plid=_playlist_id(url)
  if not plid:raise RuntimeError("Không tìm thấy playlist ID trong URL")
- errors=[]
- headers={"User-Agent":"EnglishLearningLab/2.7","Accept":"application/json"}
+ errors=[]; headers={"User-Agent":"EnglishLearningLab/2.7","Accept":"application/json"}
  for base in _proxy_instances():
   try:
-   r=requests.get(f"{base}/api/v1/playlists/{plid}",params={"page":1},headers=headers,timeout=(8,20),allow_redirects=True)
-   r.raise_for_status(); data=r.json()
-   videos=data.get("videos") or []
-   if not videos:raise RuntimeError("proxy trả về playlist nhưng không có video")
-   return [{"id":str(v.get("videoId")),"title":v.get("title") or str(v.get("videoId")),"url":f"https://www.youtube.com/watch?v={v.get('videoId')}","thumbnail":((v.get("videoThumbnails") or [{}])[-1].get("url") or f"https://i.ytimg.com/vi/{v.get('videoId')}/hqdefault.jpg"),"duration":v.get("lengthSeconds") or 0} for v in videos if re.fullmatch(r"[A-Za-z0-9_-]{11}",str(v.get("videoId") or ""))]
+   r=requests.get(f"{base}/api/v1/playlists/{plid}",params={"page":1,"hl":"en"},headers=headers,timeout=(6,15),allow_redirects=True)
+   r.raise_for_status(); data=r.json(); videos=data.get("videos") or []
+   valid=[]
+   for v in videos:
+    vid=str(v.get("videoId") or "")
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}",vid):
+     thumbs=v.get("videoThumbnails") or []
+     thumb=(thumbs[-1].get("url") if thumbs else None) or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+     valid.append({"id":vid,"title":v.get("title") or vid,"url":f"https://www.youtube.com/watch?v={vid}","thumbnail":thumb,"duration":v.get("lengthSeconds") or 0})
+   if valid:return valid,base
+   errors.append(f"{base}: no valid videos")
   except Exception as e:errors.append(f"{base}: {type(e).__name__}: {e}")
- raise RuntimeError("Proxy playlist thất bại: " + " | ".join(errors))
-
-def _extract_playlist(url):
+ raise RuntimeError("; ".join(errors))
+def _youtube_opts(impersonate=True):
+ o={"quiet":True,"no_warnings":True,"extract_flat":True,"skip_download":True,"ignoreerrors":False,"retries":2,"fragment_retries":2,"socket_timeout":15,"source_address":"0.0.0.0","http_headers":{"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36","Accept-Language":"en-US,en;q=0.9"}}
+ if impersonate:o["impersonate"]="chrome"
+ if os.getenv("YT_DLP_NO_CHECK_CERTIFICATE","0").lower() in {"1","true","yes"}:o["nocheckcertificate"]=True
+ return o
+def _direct_playlist(url):
  errors=[]
- # Direct YouTube remains the fastest path when the Space network allows it.
  for imp in (True,False):
   try:
    with yt_dlp.YoutubeDL(_youtube_opts(imp)) as y:return y.extract_info(url,download=False)
   except Exception as e:errors.append(f"{'curl_cffi' if imp else 'urllib'}: {type(e).__name__}: {e}")
- # The documented Invidious API provides /api/v1/playlists/:plid and is used
- # only after direct YouTube access fails. This changes the network node rather
- # than disabling TLS verification.
- try:return {"entries":_proxy_playlist(url),"_proxy":True}
- except Exception as e:errors.append(str(e))
  raise RuntimeError("; ".join(errors))
-
+def _extract_playlist(url):
+ # Primary: alternate network node. This prevents the known HF->YouTube TLS
+ # reset from wasting 3-5 retries on every Import click.
+ try:
+  videos,node=_proxy_playlist(url); return {"entries":videos,"_proxy":True,"_node":node}
+ except Exception as proxy_error:
+  # Optional direct fallback. Disabled by default because this is the failing
+  # route in the Space. Enable YT_DIRECT_FALLBACK=1 for diagnostics.
+  if os.getenv("YT_DIRECT_FALLBACK","0").lower() not in {"1","true","yes"}:
+   raise RuntimeError(f"Proxy metadata failed: {proxy_error}. Direct YouTube fallback is disabled; set YT_DIRECT_FALLBACK=1 to diagnose it.")
+  info=_direct_playlist(url); return info or {"entries":[]}
 def playlist(url):
  try:
-  info=_extract_playlist(url);out=[];entries=info.get("entries") or []
+  info=_extract_playlist(url); out=[]; entries=info.get("entries") or []
   for e in entries[:150]:
    if not e:continue
-   vid=e.get("id") or e.get("url")
-   if not vid:continue
-   vid=str(vid).split("?")[0].split("&")[0]
+   vid=str(e.get("id") or e.get("url") or "").split("?")[0].split("&")[0]
    if not re.fullmatch(r"[A-Za-z0-9_-]{11}",vid):continue
    title=e.get("title") or vid;item={"id":vid,"title":title,"url":f"https://www.youtube.com/watch?v={vid}","thumbnail":e.get("thumbnail") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg","duration":e.get("duration") or 0};out.append(item)
    with db() as c:c.execute("INSERT INTO videos(video_id,title,url,thumbnail,duration) VALUES(?,?,?,?,?) ON CONFLICT(video_id) DO UPDATE SET title=excluded.title,url=excluded.url,thumbnail=excluded.thumbnail,duration=excluded.duration,updated_at=CURRENT_TIMESTAMP",(vid,title,item["url"],item["thumbnail"],item["duration"]))
-  if not out:return [],"❌ Playlist đã được kết nối nhưng không tìm thấy video ID hợp lệ."
-  source="proxy fallback" if info.get("_proxy") else "YouTube"
-  return out,f"✅ {len(out)} video được đưa vào thư viện · nguồn: {source}."
+  if not out:return [],"❌ Playlist đã kết nối nhưng không tìm thấy video ID hợp lệ."
+  return out,f"✅ {len(out)} video được đưa vào thư viện · nguồn: {info.get('_node','YouTube')}"
  except Exception as e:return [],f"❌ Playlist error: {type(e).__name__}: {e}"
-
 def transcript_for(vid):
  if not vid or YouTubeTranscriptApi is None:return [],"❌ Transcript engine chưa sẵn sàng."
  try:
