@@ -1,8 +1,7 @@
-"""Structured AI Teacher for sentence-level English learning.
+"""Hugging Face AI Teacher for sentence-level English learning.
 
-Works with OpenAI-compatible chat APIs and is deliberately provider-neutral.
-The service requests JSON, validates it, and falls back to a useful local
-response when the provider is unavailable.
+Uses Hugging Face Inference Providers directly through huggingface_hub.
+No OpenAI package or OpenAI API key is required.
 """
 from __future__ import annotations
 
@@ -13,9 +12,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 try:
-    from openai import OpenAI
+    from huggingface_hub import InferenceClient
 except Exception:
-    OpenAI = None
+    InferenceClient = None
 
 
 @dataclass
@@ -49,51 +48,48 @@ class TeacherResult:
         if self.vocabulary:
             lines += ["| Word | Meaning | Type | Example |", "|---|---|---|---|"]
             for v in self.vocabulary[:12]:
-                lines.append(
-                    f"| {v.get('word','')} | {v.get('meaning','')} | "
-                    f"{v.get('type','')} | {v.get('example','')} |"
-                )
+                lines.append(f"| {v.get('word','')} | {v.get('meaning','')} | {v.get('type','')} | {v.get('example','')} |")
         else:
             lines.append("Không có mục nổi bật.")
-
         if self.collocations:
-            lines += ["", "### 🔗 Collocations / Phrasal verbs"]
-            lines += [f"- {x}" for x in self.collocations]
+            lines += ["", "### 🔗 Collocations / Phrasal verbs"] + [f"- {x}" for x in self.collocations]
         if self.pattern:
             lines += ["", f"### 💡 Sentence pattern\n`{self.pattern}`"]
         if self.pronunciation:
-            lines += ["", "### 🗣️ Pronunciation tips"]
-            lines += [f"- {x}" for x in self.pronunciation]
+            lines += ["", "### 🗣️ Pronunciation tips"] + [f"- {x}" for x in self.pronunciation]
         if self.examples:
-            lines += ["", "### ✍️ Similar examples"]
-            lines += [f"- {x}" for x in self.examples]
+            lines += ["", "### ✍️ Similar examples"] + [f"- {x}" for x in self.examples]
         if self.quiz:
-            lines += ["", "### 📝 Mini quiz"]
-            lines.append(f"**{self.quiz.get('question','')}**")
+            lines += ["", "### 📝 Mini quiz", f"**{self.quiz.get('question','')}**"]
             for i, option in enumerate(self.quiz.get('options', [])[:4]):
-                letter = chr(65 + i)
-                lines.append(f"- **{letter}.** {option}")
+                lines.append(f"- **{chr(65+i)}.** {option}")
             if self.quiz.get('answer'):
                 lines.append(f"\n<details><summary>Đáp án</summary>{self.quiz['answer']} — {self.quiz.get('explanation','')}</details>")
         return "\n".join(lines)
 
 
 class AITeacher:
-    def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None):
-        self.api_key = api_key if api_key is not None else os.getenv("AI_API_KEY", "")
-        self.base_url = base_url or os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
-        self.model = model or os.getenv("AI_MODEL", "gpt-4o-mini")
+    """AI teacher backed by Hugging Face Inference Providers."""
+
+    def __init__(self, token: str | None = None, model: str | None = None, provider: str | None = None):
+        self.token = token if token is not None else os.getenv("HF_TOKEN", "")
+        self.model = model or os.getenv("HF_AI_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
+        self.provider = provider or os.getenv("HF_AI_PROVIDER", "auto")
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key and OpenAI is not None)
+        return bool(self.token and InferenceClient is not None)
 
-    def _fallback(self, sentence: str) -> TeacherResult:
+    def _fallback(self, sentence: str, reason: str = "") -> TeacherResult:
         words = re.findall(r"[A-Za-z][A-Za-z'’-]*", sentence)
         vocab = [{"word": w, "meaning": "Tra cứu nghĩa theo ngữ cảnh", "type": "word", "example": sentence} for w in words[:8]]
+        msg = "Hugging Face AI chưa khả dụng."
+        if reason:
+            msg += f" {reason}"
+        msg += " Bạn vẫn có thể luyện nghe và shadowing."
         return TeacherResult(
-            translation="AI chưa được cấu hình. Hãy thêm AI_API_KEY để nhận bản dịch và phân tích đầy đủ.",
-            grammar={"structure": "Xem câu mẫu", "tense": "AI analysis unavailable", "subject": "—", "main_verb": "—", "explanation": "Có thể vẫn luyện nghe và shadowing khi AI không khả dụng."},
+            translation=msg,
+            grammar={"structure": "Xem câu mẫu", "tense": "AI analysis unavailable", "subject": "—", "main_verb": "—", "explanation": "Hãy kiểm tra HF_TOKEN, model và Inference Providers."},
             vocabulary=vocab,
             pattern=sentence,
         )
@@ -103,7 +99,7 @@ class AITeacher:
         if not sentence:
             return TeacherResult(translation="Chưa chọn câu.")
         if not self.available:
-            return self._fallback(sentence)
+            return self._fallback(sentence, "Cần Secret HF_TOKEN có quyền Inference Providers.")
 
         schema = {
             "translation": "natural Vietnamese translation",
@@ -117,30 +113,27 @@ class AITeacher:
         }
         prompt = f"""Analyze this English sentence for a Vietnamese learner. Return ONLY valid JSON matching this shape:\n{json.dumps(schema, ensure_ascii=False)}\n\nSentence: {sentence}\nRules: be accurate; explain grammar simply; preserve natural meaning; include IPA or connected-speech advice when useful; quiz must test the sentence, not trivia."""
         try:
-            client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+            client = InferenceClient(token=self.token, provider=self.provider)
             response = client.chat.completions.create(
                 model=self.model,
                 temperature=0.15,
-                response_format={"type": "json_object"},
+                max_tokens=1800,
                 messages=[
-                    {"role": "system", "content": "You are a precise English teacher for Vietnamese learners."},
+                    {"role": "system", "content": "You are a precise English teacher for Vietnamese learners. Return JSON only."},
                     {"role": "user", "content": prompt},
                 ],
             )
             raw = response.choices[0].message.content or "{}"
+            # Some reasoning models may wrap JSON in markdown fences.
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I | re.S)
             data = json.loads(raw)
             return TeacherResult(
-                translation=str(data.get("translation", "")),
-                grammar=data.get("grammar") or {},
-                vocabulary=data.get("vocabulary") or [],
-                collocations=data.get("collocations") or [],
-                pattern=str(data.get("pattern", "")),
-                pronunciation=data.get("pronunciation") or [],
-                examples=data.get("examples") or [],
-                quiz=data.get("quiz") or {},
-                raw=raw,
+                translation=str(data.get("translation", "")), grammar=data.get("grammar") or {},
+                vocabulary=data.get("vocabulary") or [], collocations=data.get("collocations") or [],
+                pattern=str(data.get("pattern", "")), pronunciation=data.get("pronunciation") or [],
+                examples=data.get("examples") or [], quiz=data.get("quiz") or {}, raw=raw,
             )
         except Exception as exc:
-            fallback = self._fallback(sentence)
-            fallback.raw = f"AI error: {exc}"
+            fallback = self._fallback(sentence, f"Lỗi HF AI: {type(exc).__name__}.")
+            fallback.raw = f"HF AI error: {exc}"
             return fallback
