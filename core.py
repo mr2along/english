@@ -15,9 +15,6 @@ except Exception: torch=None
 from speech.scoring import SpokenWord,score_speech
 from ai.teacher import AITeacher,hardware_info
 APP_NAME="English Learning Lab"; DEFAULT_PLAYLIST="https://youtube.com/playlist?list=PLRDC-DZ_uWhpbeuja5CFDhkVVKElpRje7"; DB_PATH=Path(os.getenv("ENGLISH_DB","english_lab.db")); WHISPER_MODEL=os.getenv("WHISPER_MODEL","small"); _whisper=None; _current_video=None
-# The Space has a network path that intermittently resets YouTube TLS.  The
-# documented Invidious public list is therefore the primary metadata route;
-# direct yt-dlp is opt-in fallback, not the first request.
 DEFAULT_INVIDIOUS_INSTANCES=("https://inv.nadeko.net","https://invidious.nerdvpn.de","https://yt.chocolatemoo53.com","https://invidious.tiekoetter.com","https://invidious.f5.si")
 
 def db():
@@ -41,15 +38,11 @@ def _proxy_playlist(url):
  errors=[]; headers={"User-Agent":"EnglishLearningLab/2.7","Accept":"application/json"}
  for base in _proxy_instances():
   try:
-   r=requests.get(f"{base}/api/v1/playlists/{plid}",params={"page":1,"hl":"en"},headers=headers,timeout=(6,15),allow_redirects=True)
-   r.raise_for_status(); data=r.json(); videos=data.get("videos") or []
-   valid=[]
+   r=requests.get(f"{base}/api/v1/playlists/{plid}",params={"page":1,"hl":"en"},headers=headers,timeout=(6,15),allow_redirects=True);r.raise_for_status();data=r.json();videos=data.get("videos") or [];valid=[]
    for v in videos:
     vid=str(v.get("videoId") or "")
     if re.fullmatch(r"[A-Za-z0-9_-]{11}",vid):
-     thumbs=v.get("videoThumbnails") or []
-     thumb=(thumbs[-1].get("url") if thumbs else None) or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
-     valid.append({"id":vid,"title":v.get("title") or vid,"url":f"https://www.youtube.com/watch?v={vid}","thumbnail":thumb,"duration":v.get("lengthSeconds") or 0})
+     thumbs=v.get("videoThumbnails") or [];thumb=(thumbs[-1].get("url") if thumbs else None) or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg";valid.append({"id":vid,"title":v.get("title") or vid,"url":f"https://www.youtube.com/watch?v={vid}","thumbnail":thumb,"duration":v.get("lengthSeconds") or 0})
    if valid:return valid,base
    errors.append(f"{base}: no valid videos")
   except Exception as e:errors.append(f"{base}: {type(e).__name__}: {e}")
@@ -67,20 +60,15 @@ def _direct_playlist(url):
   except Exception as e:errors.append(f"{'curl_cffi' if imp else 'urllib'}: {type(e).__name__}: {e}")
  raise RuntimeError("; ".join(errors))
 def _extract_playlist(url):
- # Primary: alternate network node. This prevents the known HF->YouTube TLS
- # reset from wasting 3-5 retries on every Import click.
  try:
-  videos,node=_proxy_playlist(url); return {"entries":videos,"_proxy":True,"_node":node}
+  videos,node=_proxy_playlist(url);return {"entries":videos,"_proxy":True,"_node":node}
  except Exception as proxy_error:
-  # Optional direct fallback. Disabled by default because this is the failing
-  # route in the Space. Enable YT_DIRECT_FALLBACK=1 for diagnostics.
-  if os.getenv("YT_DIRECT_FALLBACK","0").lower() not in {"1","true","yes"}:
-   raise RuntimeError(f"Proxy metadata failed: {proxy_error}. Direct YouTube fallback is disabled; set YT_DIRECT_FALLBACK=1 to diagnose it.")
-  info=_direct_playlist(url); return info or {"entries":[]}
+  if os.getenv("YT_DIRECT_FALLBACK","0").lower() not in {"1","true","yes"}:raise RuntimeError(f"Proxy metadata failed: {proxy_error}. Direct YouTube fallback is disabled; set YT_DIRECT_FALLBACK=1 to diagnose it.")
+  info=_direct_playlist(url);return info or {"entries":[]}
 def playlist(url):
  try:
-  info=_extract_playlist(url); out=[]; entries=info.get("entries") or []
-  for e in entries[:150]:
+  info=_extract_playlist(url);out=[]
+  for e in (info.get("entries") or [])[:150]:
    if not e:continue
    vid=str(e.get("id") or e.get("url") or "").split("?")[0].split("&")[0]
    if not re.fullmatch(r"[A-Za-z0-9_-]{11}",vid):continue
@@ -89,31 +77,106 @@ def playlist(url):
   if not out:return [],"❌ Playlist đã kết nối nhưng không tìm thấy video ID hợp lệ."
   return out,f"✅ {len(out)} video được đưa vào thư viện · nguồn: {info.get('_node','YouTube')}"
  except Exception as e:return [],f"❌ Playlist error: {type(e).__name__}: {e}"
+def _caption_from_yta(vid):
+ if YouTubeTranscriptApi is None:return None,"Transcript engine chưa cài."
+ api=YouTubeTranscriptApi();
+ try:return api.fetch(vid,languages=["en","en-US","en-GB"]),"English captions"
+ except Exception as first:
+  try:
+   for t in api.list(vid):
+    code=str(getattr(t,"language_code","")).lower()
+    if code.startswith("en"):return t.fetch(),f"English captions ({code})"
+  except Exception:pass
+  raise first
+def _caption_from_ytdlp(vid):
+ opts=_youtube_opts(False);opts.update({"quiet":True,"no_warnings":True,"writesubtitles":False,"writeautomaticsub":False,"listsubtitles":True})
+ with yt_dlp.YoutubeDL(opts) as y:
+  info=y.extract_info(f"https://www.youtube.com/watch?v={vid}",download=False)
+  if not info:return None,""
+  subs=info.get("subtitles") or {};auto=info.get("automatic_captions") or {}
+  for pool,label in ((subs,"English subtitles"),(auto,"English auto captions")):
+   for code in ("en","en-US","en-GB"):
+    if code in pool:return pool[code],label
+   for code,val in pool.items():
+    if str(code).lower().startswith("en"):return val,label
+ return None,""
+def _caption_from_invidious(vid):
+ errors=[]
+ for base in _proxy_instances():
+  try:
+   r=requests.get(f"{base}/api/v1/captions/{vid}",params={"label":"English"},headers={"User-Agent":"EnglishLearningLab/2.7","Accept":"application/json"},timeout=(6,15));r.raise_for_status();data=r.json();caps=data.get("captions") or []
+   for c in caps:
+    if str(c.get("languageCode","")).lower().startswith("en") and c.get("url"):return c["url"],f"Invidious {base}"
+  except Exception as e:errors.append(f"{base}: {type(e).__name__}")
+ return None,""
+def _transcript_pieces(raw):
+ pieces=[]
+ if not raw:return pieces
+ for x in raw:
+  if isinstance(x,dict):text=clean(x.get("text"));s=float(x.get("start",0));dur=float(x.get("duration",0))
+  else:text=clean(getattr(x,"text",""));s=float(getattr(x,"start",0));dur=float(getattr(x,"duration",0))
+  if text:pieces.append((text,s,s+dur))
+ return pieces
+def _pieces_to_sentences(vid,pieces):
+ result=[];buf=[];start=end=None
+ for text,s,e in pieces:
+  start=s if start is None else start;end=e;buf.append(text);j=clean(" ".join(buf))
+  if re.search(r"[.!?…]$",j) or len(j)>=180:result.append({"index":len(result),"text":j,"start":start,"end":end});buf=[];start=end=None
+ if buf:result.append({"index":len(result),"text":clean(" ".join(buf)),"start":start or 0,"end":end or 0})
+ with db() as c:
+  c.execute("DELETE FROM sentences WHERE video_id=?",(vid,));c.executemany("INSERT INTO sentences(video_id,sentence_index,text,start,end_time) VALUES(?,?,?,?,?)",[(vid,x["index"],x["text"],x["start"],x["end"]) for x in result]);c.execute("UPDATE videos SET status='in-progress',updated_at=CURRENT_TIMESTAMP WHERE video_id=?",(vid,))
+ return result
 def transcript_for(vid):
- if not vid or YouTubeTranscriptApi is None:return [],"❌ Transcript engine chưa sẵn sàng."
+ if not vid:return [],"❌ Chưa chọn video."
+ errors=[]
  try:
-  api=YouTubeTranscriptApi();raw=None
-  try:raw=api.fetch(vid,languages=["en","en-US","en-GB"])
-  except Exception:
-   try:
-    for t in api.list(vid):
-     if str(getattr(t,"language_code","")).startswith("en"):raw=t.fetch();break
-   except Exception:pass
-  if raw is None:return [],"❌ Video không có English transcript khả dụng."
-  pieces=[]
-  for x in raw:
-   text=clean(getattr(x,"text",""))
-   if text:
-    s=float(getattr(x,"start",0));pieces.append((text,s,s+float(getattr(x,"duration",0))))
-  result=[];buf=[];start=end=None
-  for text,s,e in pieces:
-   start=s if start is None else start;end=e;buf.append(text);j=clean(" ".join(buf))
-   if re.search(r"[.!?…]$",j) or len(j)>=180:result.append({"index":len(result),"text":j,"start":start,"end":end});buf=[];start=end=None
-  if buf:result.append({"index":len(result),"text":clean(" ".join(buf)),"start":start or 0,"end":end or 0})
-  with db() as c:
-   c.execute("DELETE FROM sentences WHERE video_id=?",(vid,));c.executemany("INSERT INTO sentences(video_id,sentence_index,text,start,end_time) VALUES(?,?,?,?,?)",[(vid,x["index"],x["text"],x["start"],x["end"]) for x in result]);c.execute("UPDATE videos SET status='in-progress',updated_at=CURRENT_TIMESTAMP WHERE video_id=?",(vid,))
-  return result,f"✅ {len(result)} câu transcript."
- except Exception as e:return [],f"❌ Transcript error: {type(e).__name__}: {e}"
+  raw,source=_caption_from_yta(vid);pieces=_transcript_pieces(raw);result=_pieces_to_sentences(vid,pieces);return result,f"✅ {len(result)} câu · nguồn: {source}"
+ except Exception as e:errors.append(f"YouTubeTranscript: {type(e).__name__}")
+ try:
+  raw,source=_caption_from_ytdlp(vid)
+  if raw:
+   if isinstance(raw,list) and raw and isinstance(raw[0],dict) and raw[0].get("url"):
+    # subtitle URL is intentionally not downloaded here; direct caption API remains the next safe fallback
+    pass
+  elif raw:pass
+ except Exception as e:errors.append(f"yt-dlp: {type(e).__name__}")
+ try:
+  cap_url,source=_caption_from_invidious(vid)
+  if cap_url:
+   r=requests.get(cap_url,headers={"User-Agent":"EnglishLearningLab/2.7"},timeout=(6,20));r.raise_for_status()
+   text=r.text
+   # YouTube/Invidious caption responses can be XML or JSON.
+   pieces=[]
+   if text.lstrip().startswith("{"):
+    data=r.json();events=data.get("events") or []
+    for ev in events:
+     txt=clean(" ".join(str(x.get("utf8", "")) for seg in ev.get("segs",[]) for x in [seg]));
+     if txt:pieces.append((txt,float(ev.get("tStartMs",0))/1000,(float(ev.get("tStartMs",0))+float(ev.get("dDurationMs",0)))/1000))
+   else:
+    import html
+    for m in re.finditer(r'<text[^>]*start="([0-9.]+)"[^>]*dur="([0-9.]+)"[^>]*>(.*?)</text>',text,re.S):pieces.append((clean(html.unescape(re.sub(r"<[^>]+>"," ",m.group(3)))),float(m.group(1)),float(m.group(1))+float(m.group(2))))
+   if pieces:
+    result=_pieces_to_sentences(vid,pieces);return result,f"✅ {len(result)} câu · nguồn: {source}"
+ except Exception as e:errors.append(f"Invidious captions: {type(e).__name__}")
+ # Last fallback: Whisper on the video's audio. This is intentionally lazy so
+ # importing 150 videos does not download 150 audio tracks at once.
+ try:
+  result,status=_whisper_video(vid)
+  if result:return result,status
+ except Exception as e:errors.append(f"Whisper: {type(e).__name__}: {e}")
+ return [],"❌ Không lấy được English transcript. Đã thử YouTube captions → yt-dlp captions → Invidious captions → Whisper. " + "; ".join(errors)
+def _whisper_video(vid):
+ model=get_whisper()
+ if model is None:return [],""
+ audio_path=f"/tmp/englishlab_{vid}.m4a"
+ opts={"quiet":True,"no_warnings":True,"format":"bestaudio/best","outtmpl":audio_path,"noplaylist":True,"retries":1,"socket_timeout":20,"http_headers":{"User-Agent":"Mozilla/5.0"}}
+ with yt_dlp.YoutubeDL(opts) as y:y.download([f"https://www.youtube.com/watch?v={vid}"])
+ segs,_=model.transcribe(audio_path,language="en",beam_size=5,word_timestamps=False,vad_filter=True)
+ pieces=[(clean(s.text),float(s.start),float(s.end)) for s in segs if clean(s.text)]
+ result=_pieces_to_sentences(vid,pieces)
+ try:os.remove(audio_path)
+ except OSError:pass
+ return result,f"✅ {len(result)} câu · nguồn: Whisper"
 def load_library(url):
  items,status=playlist(url);choices=[f"{i+1:03d} | {x['title']}" for i,x in enumerate(items)];return gr.update(choices=choices,value=choices[0] if choices else None),items,status,stats()
 def load_lesson(choice,items):
