@@ -2,28 +2,38 @@
 
 A professional YouTube-based English listening, shadowing, pronunciation, grammar, vocabulary and progress-learning app designed for Hugging Face Spaces.
 
-## V2.3 — Local AI Teacher
+## V2.4 — Local AI + Learning System
 
 AI Teacher runs **locally inside the Hugging Face Space** with `Qwen/Qwen3-4B` and Transformers. It does not call OpenAI, DeepSeek, Qwen API, or Hugging Face Inference Providers.
 
-Qwen's official model card supports direct Transformers loading and recommends a current Transformers release. urlQwen3-4B model cardhttps://huggingface.co/Qwen/Qwen3-4B
+Qwen's official model card supports direct Transformers loading and recommends a current Transformers release.
 
-### Recommended free deployment: ZeroGPU
+### New in V2.4
 
-For practical response speed, configure the Space hardware as **ZeroGPU**. Hugging Face documents ZeroGPU as free GPU access for eligible personal accounts; free accounts in good standing can host up to 2 ZeroGPU Spaces. The current free quota is 5 minutes of GPU usage per 24-hour period, subject to the Space queue. urlHugging Face ZeroGPU documentationhttps://huggingface.co/docs/hub/spaces-zerogpu
+- Persistent vocabulary extracted from AI Teacher results.
+- Spaced repetition scheduler based on an SM-2-inspired algorithm.
+- Daily due-word queue.
+- Vocabulary mastery tracking.
+- Interactive multiple-choice quiz generated from the current sentence.
+- Quiz accuracy statistics.
+- SQLite persistence so learning history survives Space restarts when persistent storage is available.
+
+### Recommended deployment: ZeroGPU
+
+For practical response speed, configure the Space hardware as **ZeroGPU**. Hugging Face documents ZeroGPU as dynamically allocated GPU infrastructure; eligible free personal accounts can host up to 2 ZeroGPU Spaces and the current Free quota is 5 minutes of GPU time per 24 hours.
 
 In the Space:
 
 1. Open **Settings**.
 2. Open **Hardware**.
-3. Select **ZeroGPU**.
+3. Select **ZeroGPU** if it is available for the account.
 4. Restart/rebuild the Space.
 
-The code uses `spaces.GPU` around the AI generation function so GPU time is requested only when the AI Teacher is used.
+The app uses `spaces.GPU` for local model inference. ZeroGPU is currently Gradio-only.
 
 ### CPU fallback
 
-CPU Basic is still supported, but Qwen3-4B generation is substantially slower. Hugging Face lists CPU Basic at 2 vCPU and 16 GB RAM. urlSpaces hardware documentationhttps://huggingface.co/docs/hub/spaces-overview
+CPU Basic remains supported, but Qwen3-4B generation is substantially slower. Hugging Face lists CPU Basic as 2 vCPU / 16 GB RAM.
 
 ### Local model configuration
 
@@ -35,7 +45,7 @@ WHISPER_MODEL=small
 PORT=7860
 ```
 
-No `HF_TOKEN` is required for the AI Teacher itself when the public model can be downloaded anonymously.
+No API key is required for the local AI Teacher when the public model can be downloaded anonymously.
 
 ## Main features
 
@@ -50,6 +60,10 @@ No `HF_TOKEN` is required for the AI Teacher itself when the public model can be
 - Sentence patterns
 - Pronunciation tips
 - AI-generated mini quiz
+- Persistent vocabulary database
+- Spaced repetition / due review queue
+- Vocabulary mastery tracking
+- Interactive quiz and accuracy tracking
 - Microphone practice with Whisper
 - Pronunciation/text similarity scoring
 - SQLite learning progress
@@ -59,5 +73,21 @@ No `HF_TOKEN` is required for the AI Teacher itself when the public model can be
 
 ```bash
 pip install -r requirements.txt
-python app_v23.py
+python app_v24.py
+```
+
+## Project structure
+
+```text
+english/
+├── app.py
+├── app_v23.py
+├── app_v24.py
+├── ai/
+│   └── teacher.py
+├── learning/
+│   └── progress.py
+├── speech/
+│   └── scoring.py
+└── requirements.txt
 ```
