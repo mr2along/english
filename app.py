@@ -47,7 +47,9 @@ def session_status(idx, ss):
 def import_library(url):
     """Import once and populate BOTH Library and Learning Session selectors."""
     video_update, items, status, dash = load_library(url)
-    return video_update, gr.update(choices=video_update.get("choices", []), value=video_update.get("value")), items, status, dash
+    choices = video_update.get("choices", [])
+    value = video_update.get("value")
+    return video_update, gr.update(choices=choices, value=value), items, status, dash
 
 
 CSS = """.gradio-container{max-width:1180px!important}.hero{padding:22px;border-radius:22px;margin-bottom:14px;background:linear-gradient(135deg,#0f172a,#334155);color:white}.hero h1{margin:0;font-size:30px}.hero p{margin:5px 0 0;opacity:.82}.runtime{padding:10px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.step{border:1px solid #e2e8f0;border-radius:18px;padding:18px;margin:8px 0}.sentence-main{font-size:26px;line-height:1.45;font-weight:600;padding:22px;border-radius:18px;border:1px solid #cbd5e1;min-height:100px}.player{position:relative;padding-top:56.25%;overflow:hidden;border-radius:18px;background:#000}.player iframe{position:absolute;inset:0;width:100%;height:100%;border:0}@media(max-width:700px){.gradio-container{padding:8px!important}.hero h1{font-size:24px}.sentence-main{font-size:21px}.step{padding:12px}}"""
@@ -62,6 +64,10 @@ def main():
         gr.HTML('<div class="hero"><h1>🇬🇧 English Learning Lab</h1><p>Listening · Shadowing · Speaking · Grammar · Vocabulary · Quiz · Progress</p></div>')
         gr.Markdown(runtime_status(), elem_classes=["runtime"])
         dashboard = gr.Markdown(stats() + " · " + learning_stats())
+
+        # Shared video selector is created before any event handlers so both
+        # Library and Learning Session can safely update it.
+        session_video = gr.Dropdown(label="🎬 Chọn video để luyện", choices=[], interactive=True, visible=False)
 
         with gr.Tab("📚 Library"):
             with gr.Row():
@@ -78,6 +84,7 @@ def main():
             )
 
         with gr.Tab("🎯 Learning Session"):
+            # Reuse the shared selector and reveal it in this tab.
             session_video = gr.Dropdown(label="🎬 Chọn video để luyện", choices=[], interactive=True)
             session_progress = gr.Markdown("Chưa có bài học.")
             sentence_index = gr.Number(value=0, visible=False, elem_id="sentence_index")
