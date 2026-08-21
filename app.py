@@ -45,7 +45,7 @@ def session_status(idx, ss):
 
 
 def import_library(url):
-    """Import once and populate BOTH Library and Learning Session selectors."""
+    """Import playlist and populate both video selectors."""
     video_update, items, status, dash = load_library(url)
     choices = video_update.get("choices", [])
     value = video_update.get("value")
@@ -65,10 +65,6 @@ def main():
         gr.Markdown(runtime_status(), elem_classes=["runtime"])
         dashboard = gr.Markdown(stats() + " · " + learning_stats())
 
-        # Shared video selector is created before any event handlers so both
-        # Library and Learning Session can safely update it.
-        session_video = gr.Dropdown(label="🎬 Chọn video để luyện", choices=[], interactive=True, visible=False)
-
         with gr.Tab("📚 Library"):
             with gr.Row():
                 playlist = gr.Textbox(label="YouTube Playlist", value=DEFAULT_PLAYLIST, scale=8)
@@ -78,13 +74,10 @@ def main():
             title = gr.Markdown()
             player = gr.HTML()
             transcript_status = gr.Markdown()
-            import_btn.click(import_library, playlist, [video, session_video, library, status, dashboard])
-            video.change(load_lesson, [video, library], [player, sentences, transcript_status, title]).then(
-                lambda v: gr.update(value=v), video, session_video
-            )
 
         with gr.Tab("🎯 Learning Session"):
-            # Reuse the shared selector and reveal it in this tab.
+            # This is the only Learning Session video selector. Import and the
+            # Library selector update it after all components have been created.
             session_video = gr.Dropdown(label="🎬 Chọn video để luyện", choices=[], interactive=True)
             session_progress = gr.Markdown("Chưa có bài học.")
             sentence_index = gr.Number(value=0, visible=False, elem_id="sentence_index")
@@ -96,12 +89,6 @@ def main():
             with gr.Row():
                 prev_btn = gr.Button("◀ Câu trước")
                 next_btn = gr.Button("Câu tiếp ▶", variant="primary")
-
-            session_video.change(
-                load_lesson,
-                [session_video, library],
-                [session_player, sentences, transcript_status, title],
-            ).then(lambda: 0, outputs=sentence_index)
 
             with gr.Group(elem_classes="step"):
                 gr.Markdown("### 1️⃣ Listen — Nghe trước")
@@ -140,6 +127,21 @@ def main():
         with gr.Tab("📊 Progress"):
             progress = gr.Markdown(stats() + " · " + learning_stats())
             refresh = gr.Button("🔄 Refresh")
+
+        # All event wiring happens after both video selectors exist.
+        import_btn.click(import_library, playlist, [video, session_video, library, status, dashboard])
+
+        video.change(
+            load_lesson,
+            [video, library],
+            [player, sentences, transcript_status, title],
+        ).then(lambda v: gr.update(value=v), video, session_video)
+
+        session_video.change(
+            load_lesson,
+            [session_video, library],
+            [session_player, sentences, transcript_status, title],
+        ).then(lambda: 0, outputs=sentence_index)
 
         sentence_index.change(
             lambda i, ss: (*select_sentence(i, ss), session_status(i, ss), i),
