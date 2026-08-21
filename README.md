@@ -1,65 +1,86 @@
-# 🇬🇧 English Learning Lab
+---
+title: English Learning Lab
+emoji: 🇬🇧
+colorFrom: indigo
+colorTo: blue
+sdk: gradio
+sdk_version: 5.50.0
+app_file: app.py
+pinned: false
+---
 
-A professional YouTube-based English listening, shadowing, pronunciation, grammar, vocabulary and progress-learning app designed for Hugging Face Spaces.
+# 🇬🇧 English Learning Lab — V2.6
 
-## V2.5 — Guided Learning Session
+Professional YouTube-based English listening, shadowing, pronunciation, grammar, vocabulary, quiz and progress-learning app for Vietnamese learners.
 
-AI Teacher runs locally inside the Hugging Face Space with `Qwen/Qwen3-4B` and Transformers. The learning flow is designed for mobile use:
+## Learning flow
 
-**Listen → Recall/Reveal → Translate → Shadowing → AI Teacher → Quiz → Next sentence**
+**YouTube → transcript → Listen → Hide/Reveal → Translate → Shadowing → Qwen3-4B AI Teacher → Quiz → Spaced Repetition → Progress**
 
-No OpenAI, DeepSeek, Qwen API, or Hugging Face Inference Provider is required for the local AI Teacher.
+## AI architecture
 
-### V2.5 features
+- Qwen/Qwen3-4B runs locally with Transformers/PyTorch inside the Space.
+- No OpenAI API.
+- No DeepSeek API.
+- No Qwen API.
+- No Hugging Face Inference Providers.
+- No AI API key is required for the local teacher when the public model can be downloaded.
+- Faster-Whisper is used locally for speech recognition/scoring.
 
-- Mobile-first guided learning session.
-- Sentence-by-sentence progress indicator.
+## Features
+
+- YouTube playlist import and video library.
+- Sentence-level transcript navigation.
 - Hide/reveal transcript for listening recall.
 - Vietnamese translation.
 - Microphone shadowing and speech-to-text scoring.
-- Local Qwen3-4B grammar/vocabulary/quiz teacher.
-- Persistent vocabulary and spaced repetition from V2.4.
+- Local Qwen3-4B grammar, vocabulary, collocations, pronunciation tips, examples and quiz generation.
 - SQLite learning progress.
-- YouTube playlist/video library.
+- Vocabulary review and spaced repetition.
+- Quiz history and learning statistics.
+- Mobile-first Gradio UI.
 
-### Recommended deployment: ZeroGPU
+## Hugging Face ZeroGPU
 
-For practical response speed, configure the Space hardware as **ZeroGPU** when available. Hugging Face documents ZeroGPU as dynamically allocated GPU infrastructure and currently lists a 48 GB `large` configuration; Free personal accounts in good standing can host up to 2 ZeroGPU Spaces with 5 minutes of daily GPU quota. urlHugging Face ZeroGPU documentationhttps://huggingface.co/docs/hub/spaces-zerogpu
+Select **ZeroGPU** hardware for the Space when available. ZeroGPU is dynamically allocated and is compatible with Gradio Spaces. Free accounts in good standing can host up to 2 ZeroGPU Spaces; the current documented Free quota is 5 minutes of GPU usage per 24 hours. See the official documentation for current limits:
 
-ZeroGPU is currently compatible with Gradio Spaces. urlHugging Face Gradio Spaces documentationhttps://huggingface.co/docs/hub/spaces-sdks-gradio
+https://huggingface.co/docs/hub/spaces-zerogpu
 
-### Local model configuration
+The Qwen analysis function uses `@spaces.GPU`, and the model is prepared at process startup for efficient ZeroGPU execution.
+
+## Environment
 
 ```text
 HF_LOCAL_MODEL=Qwen/Qwen3-4B
-HF_LOCAL_MAX_NEW_TOKENS=700
+HF_LOCAL_MAX_NEW_TOKENS=500
 HF_LOCAL_MAX_INPUT_TOKENS=1024
 WHISPER_MODEL=small
 PORT=7860
 ```
 
-No API key is required for the local AI Teacher when the public model can be downloaded anonymously.
-
-## Run
+## Local run
 
 ```bash
 pip install -r requirements.txt
-python app_v25.py
+python app.py
 ```
 
 ## Project structure
 
 ```text
 english/
-├── app.py
-├── app_v23.py
-├── app_v24.py
-├── app_v25.py
+├── app.py                 # single production entrypoint
+├── core.py                # YouTube, transcript, speech and app helpers
 ├── ai/
-│   └── teacher.py
+│   └── teacher.py         # local Qwen3-4B AI Teacher
 ├── learning/
-│   └── progress.py
+│   └── progress.py        # SQLite, vocabulary, SRS and quiz progress
 ├── speech/
-│   └── scoring.py
-└── requirements.txt
+│   └── scoring.py         # shadowing/scoring engine
+├── requirements.txt
+└── README.md
 ```
+
+## Deployment
+
+Configure the Space as a Gradio Space and set `app.py` as the application file. Hugging Face Spaces rebuilds and restarts after commits to the Space repository.
