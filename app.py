@@ -1,8 +1,93 @@
 """English Learning Lab — adaptive production entrypoint."""
 import os
+import re
+import html
+import requests
 import gradio as gr
-from core import APP_NAME, DEFAULT_PLAYLIST, load_library, load_lesson, select_sentence, translate, check_speaking, stats, runtime_status
+from core import APP_NAME, DEFAULT_PLAYLIST, load_library, load_lesson as _core_load_lesson, select_sentence, translate, check_speaking, stats, runtime_status
 from learning.progress import save_teacher_result, learning_stats
+
+INVIDIOUS_INSTANCES = tuple(x.strip().rstrip("/") for x in os.getenv("INVIDIOUS_INSTANCES", "https://inv.nadeko.net,https://invidious.nerdvpn.de,https://yt.chocolatemoo53.com,https://invidious.tiekoetter.com,https://invidious.f5.si").split(",") if x.strip())
+
+def _selected_video(choice, items):
+    if not choice or not items:
+        return None
+    try:
+        i = int(str(choice).split("|", 1)[0]) - 1
+        return items[i] if 0 <= i < len(items) else None
+    except Exception:
+        return None
+
+def _caption_sentences(video_id):
+    """Fetch English captions through Invidious without touching YouTube/yt-dlp SSL."""
+    errors = []
+    for base in INVIDIOUS_INSTANCES:
+        try:
+            r = requests.get(
+                f"{base}/api/v1/captions/{video_id}",
+                params={"label": "English"},
+                headers={"User-Agent": "EnglishLearningLab/2.7", "Accept": "application/json"},
+                timeout=(5, 12),
+            )
+            r.raise_for_status()
+            data = r.json()
+            captions = data.get("captions") or []
+            cap = next((c for c in captions if str(c.get("languageCode", "")).lower().startswith("en") and c.get("url")), None)
+            if not cap:
+                errors.append(f"{base}: no English captions")
+                continue
+            cr = requests.get(cap["url"], headers={"User-Agent": "EnglishLearningLab/2.7"}, timeout=(5, 15))
+            cr.raise_for_status()
+            text = cr.text
+            pieces = []
+            if text.lstrip().startswith("{"):
+                events = cr.json().get("events") or []
+                for ev in events:
+                    txt = " ".join(str(seg.get("utf8", "")) for seg in (ev.get("segs") or [])).strip()
+                    txt = re.sub(r"\s+", " ", txt)
+                    if txt:
+                        s = float(ev.get("tStartMs", 0)) / 1000.0
+                        e = s + float(ev.get("dDurationMs", 0)) / 1000.0
+                        pieces.append((txt, s, e))
+            else:
+                for m in re.finditer(r'<text[^>]*start="([0-9.]+)"[^>]*dur="([0-9.]+)"[^>]*>(.*?)</text>', text, re.S):
+                    txt = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", m.group(3)))).strip()
+                    if txt:
+                        s = float(m.group(1)); e = s + float(m.group(2)); pieces.append((txt, s, e))
+            if not pieces:
+                errors.append(f"{base}: empty caption response")
+                continue
+            result = []
+            buf = []
+            start = end = None
+            for txt, s, e in pieces:
+                start = s if start is None else start
+                end = e
+                buf.append(txt)
+                sentence = re.sub(r"\s+", " ", " ".join(buf)).strip()
+                if re.search(r"[.!?…]$", sentence) or len(sentence) >= 180:
+                    result.append({"index": len(result), "text": sentence, "start": start, "end": end})
+                    buf = []; start = end = None
+            if buf:
+                result.append({"index": len(result), "text": re.sub(r"\s+", " ", " ".join(buf)).strip(), "start": start or 0, "end": end or 0})
+            return result, f"✅ {len(result)} câu · nguồn: Invidious {base}"
+        except Exception as e:
+            errors.append(f"{base}: {type(e).__name__}")
+    return [], ""
+
+def load_lesson(choice, items):
+    """Load lesson with Invidious captions first; only fall back to core."""
+    video = _selected_video(choice, items)
+    if not video:
+        return "", [], "❌ Chưa chọn video.", ""
+    vid = str(video.get("id", ""))
+    sentences, caption_status = _caption_sentences(vid)
+    embed = f'<div class="player"><iframe src="https://www.youtube.com/embed/{vid}?enablejsapi=1&rel=0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>'
+    if sentences:
+        return embed, sentences, caption_status, f"### {video.get('title', vid)}"
+    # Preserve the existing multi-source fallback if the proxy has no captions.
+    player, ss, status, title = _core_load_lesson(choice, items)
+    return player or embed, ss, status or "❌ Không lấy được English transcript.", title or f"### {video.get('title', vid)}"
 
 def analyze_teacher(sentence, idx):
     if not sentence: return "⚠️ Chưa có câu để phân tích.", {}, learning_stats()
@@ -38,14 +123,12 @@ def render_sentence_zero(ss):
     return text,raw,timestamp,session_status(0,ss),idx
 
 def render_sentence(i,ss):
-    text,raw,timestamp,idx=select_sentence(i,ss)
     if not ss:
         return "<div class='sentence-main'>Chưa có transcript cho video này.</div>","","",session_status(0,ss),0
+    text,raw,timestamp,idx=select_sentence(i,ss)
     return text,raw,timestamp,session_status(i,ss),idx
 
 def open_session(choice,items):
-    """Load the selected video and render sentence 1 in one Gradio event.
-    This avoids relying on chained State updates between tabs."""
     if not choice or not items:
         return "","[]","❌ Chưa chọn video.","","<div class='sentence-main'>Chọn video để bắt đầu.</div>","","", "Chưa có bài học.",0
     player,ss,status,title=load_lesson(choice,items)
@@ -87,9 +170,7 @@ def main():
             progress=gr.Markdown(stats()+" · "+learning_stats()); refresh=gr.Button("🔄 Refresh")
 
         import_btn.click(import_library,playlist,[video,session_video,library,status,dashboard])
-        # Selecting in Library immediately opens the same lesson in Learning Session.
         video.change(open_session,[video,library],[session_player,sentences,transcript_status,title,current_sentence,current_text,timestamp,session_progress,sentence_index]).then(lambda v:gr.update(value=v),video,session_video)
-        # Selecting directly inside Learning Session also loads/render sentence 1.
         session_video.change(open_session,[session_video,library],[session_player,sentences,transcript_status,title,current_sentence,current_text,timestamp,session_progress,sentence_index])
         sentence_index.change(render_sentence,[sentence_index,sentences],[current_sentence,current_text,timestamp,session_progress,sentence_index])
         next_btn.click(next_index,[sentence_index,sentences],sentence_index); prev_btn.click(prev_index,[sentence_index,sentences],sentence_index)
