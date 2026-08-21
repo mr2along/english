@@ -1,6 +1,6 @@
 ---
 title: English Learning Lab
-emoji: 🇬🇧
+emoji: 📜
 colorFrom: indigo
 colorTo: blue
 sdk: gradio
