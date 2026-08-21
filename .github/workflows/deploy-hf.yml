@@ -1,0 +1,28 @@
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches:
+      - feature/english-lab-v21
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate and deploy to Hugging Face
+        uses: huggingface/hub-sync@v0.1
+        with:
+          github_repository: mr2along/english
+          hf_repo_id: Mrlongpro/autosubs
+          hf_repo_type: space
+          hf_space_sdk: gradio
+          hf_space_sdk_version: 5.50.0
+          hf_space_app_file: app.py
