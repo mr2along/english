@@ -1,9 +1,21 @@
 """Local AI Teacher powered by Qwen3-4B.
 
-The model runs inside the Hugging Face Space with Transformers.
-No OpenAI, DeepSeek, Qwen API, Inference Providers, or API key is used.
+Runs locally in the Hugging Face Space. No OpenAI, DeepSeek, Qwen API,
+Inference Providers, or external AI inference service is used.
 """
 from __future__ import annotations
+
+# ZeroGPU should be imported before CUDA/PyTorch-related imports.
+try:
+    import spaces
+except Exception:
+    class _SpacesFallback:
+        @staticmethod
+        def GPU(*args, **kwargs):
+            def deco(fn):
+                return fn
+            return deco
+    spaces = _SpacesFallback()
 
 import json
 import os
@@ -19,19 +31,8 @@ except Exception:
     AutoModelForCausalLM = None
     AutoTokenizer = None
 
-try:
-    import spaces
-except Exception:
-    class _SpacesFallback:
-        @staticmethod
-        def GPU(*args, **kwargs):
-            def deco(fn):
-                return fn
-            return deco
-    spaces = _SpacesFallback()
-
 MODEL_NAME = os.getenv("HF_LOCAL_MODEL", "Qwen/Qwen3-4B")
-MAX_NEW_TOKENS = int(os.getenv("HF_LOCAL_MAX_NEW_TOKENS", "700"))
+MAX_NEW_TOKENS = int(os.getenv("HF_LOCAL_MAX_NEW_TOKENS", "500"))
 MAX_INPUT_TOKENS = int(os.getenv("HF_LOCAL_MAX_INPUT_TOKENS", "1024"))
 
 _tokenizer = None
@@ -73,24 +74,26 @@ class TeacherResult:
         else:
             lines.append("Không có mục nổi bật.")
         if self.collocations:
-            lines += ["", "### 🔗 Collocations / Phrasal verbs"] + [f"- {x}" for x in self.collocations]
+            lines += ["", "### 🔗 Collocations / Phrasal verbs"] + [f"- {x}" for x in self.collocations[:10]]
         if self.pattern:
             lines += ["", f"### 💡 Sentence pattern\n`{self.pattern}`"]
         if self.pronunciation:
-            lines += ["", "### 🗣️ Pronunciation tips"] + [f"- {x}" for x in self.pronunciation]
+            lines += ["", "### 🗣️ Pronunciation tips"] + [f"- {x}" for x in self.pronunciation[:10]]
         if self.examples:
-            lines += ["", "### ✍️ Similar examples"] + [f"- {x}" for x in self.examples]
+            lines += ["", "### ✍️ Similar examples"] + [f"- {x}" for x in self.examples[:6]]
         if self.quiz:
             lines += ["", "### 📝 Mini quiz", f"**{self.quiz.get('question','')}**"]
             for i, option in enumerate(self.quiz.get('options', [])[:4]):
                 lines.append(f"- **{chr(65+i)}.** {option}")
-            if self.quiz.get('answer'):
-                lines.append(f"\n<details><summary>Đáp án</summary>{self.quiz['answer']} — {self.quiz.get('explanation','')}</details>")
         return "\n".join(lines)
 
 
 def _load_model():
-    """Load Qwen once, using low-memory loading and the best available device."""
+    """Load the model once at process startup.
+
+    ZeroGPU works best when the model is prepared at module scope rather than
+    being loaded inside every GPU-decorated request.
+    """
     global _tokenizer, _model
     if _tokenizer is not None and _model is not None:
         return _tokenizer, _model
@@ -99,6 +102,8 @@ def _load_model():
 
     _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
 
+    # ZeroGPU exposes CUDA emulation during startup so the model can be placed
+    # on CUDA at module scope. On ordinary CPU environments we keep CPU mode.
     if torch.cuda.is_available():
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         _model = AutoModelForCausalLM.from_pretrained(
@@ -108,15 +113,12 @@ def _load_model():
             low_cpu_mem_usage=True,
         )
     else:
-        # CPU Basic has 16 GB RAM; BF16 keeps the 4B model substantially smaller
-        # than FP32. Generation is slower, but remains possible without an API.
         _model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
         _model.to("cpu")
-
     _model.eval()
     return _tokenizer, _model
 
@@ -148,12 +150,12 @@ class AITeacher:
             msg += f" {reason}"
         return TeacherResult(
             translation=msg,
-            grammar={"structure": "Xem câu mẫu", "tense": "AI analysis unavailable", "subject": "—", "main_verb": "—", "explanation": "Kiểm tra transformers, torch và tài nguyên Space."},
+            grammar={"structure": "Xem câu mẫu", "tense": "AI analysis unavailable", "subject": "—", "main_verb": "—", "explanation": "Kiểm tra Transformers, PyTorch và tài nguyên Space."},
             vocabulary=vocab,
             pattern=sentence,
         )
 
-    @spaces.GPU(duration=180)
+    @spaces.GPU(duration=60)
     def analyze(self, sentence: str) -> TeacherResult:
         sentence = (sentence or "").strip()
         if not sentence:
@@ -178,28 +180,12 @@ class AITeacher:
                 {"role": "system", "content": "You are a precise English teacher for Vietnamese learners. Return JSON only. Do not include reasoning or markdown."},
                 {"role": "user", "content": prompt},
             ]
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-            inputs = tokenizer(
-                [text],
-                return_tensors="pt",
-                truncation=True,
-                max_length=MAX_INPUT_TOKENS,
-            )
+            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+            inputs = tokenizer([text], return_tensors="pt", truncation=True, max_length=MAX_INPUT_TOKENS)
             device = next(model.parameters()).device
             inputs = {k: v.to(device) for k, v in inputs.items()}
             with torch.inference_mode():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=MAX_NEW_TOKENS,
-                    do_sample=False,
-                    repetition_penalty=1.05,
-                    use_cache=True,
-                )
+                outputs = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False, repetition_penalty=1.05, use_cache=True)
             generated = outputs[0][inputs["input_ids"].shape[-1]:]
             raw = tokenizer.decode(generated, skip_special_tokens=True).strip()
             data = _extract_json(raw)
@@ -213,3 +199,12 @@ class AITeacher:
             fallback = self._fallback(sentence, f"Lỗi local Qwen: {type(exc).__name__}.")
             fallback.raw = f"Local Qwen error: {exc}"
             return fallback
+
+
+# Prepare the model once at startup for ZeroGPU/regular GPU deployments.
+try:
+    _load_model()
+except Exception:
+    # Keep the Space bootable on CPU-only local development; the request path
+    # will return a useful fallback if model loading is unavailable.
+    pass
