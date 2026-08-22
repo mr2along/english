@@ -62,12 +62,10 @@ CSS = r'''
 .ttext{flex:1;color:#172033}
 '''
 
-# All YouTube transcript retrieval is deliberately performed in the user's browser.
-# No YouTube transcript request is made by the HF/Python server.
 JS = r'''() => {
-  const state = {videoId:null, tracks:[], segments:[], timer:null};
-  const $ = (id) => document.getElementById(id);
-  const status = (text) => { const el=$('client-status'); if(el) el.textContent=text; };
+  const state = {videoId:null, tracks:[], segments:[]};
+  const byId = (id) => document.getElementById(id);
+  const status = (text) => { const el=byId('client-status'); if(el) el.textContent=text; };
   const esc = (s) => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const time = (s) => { s=Math.max(0,Math.floor(Number(s)||0)); const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60; return h?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`; };
   const getId = (value) => {
@@ -76,61 +74,59 @@ JS = r'''() => {
     try { const u=new URL(value); if(u.hostname==='youtu.be') return u.pathname.split('/').filter(Boolean)[0]||null; const q=u.searchParams.get('v'); if(q&&/^[A-Za-z0-9_-]{11}$/.test(q)) return q; const p=u.pathname.split('/').filter(Boolean); if(p.length>=2&&['embed','shorts','live'].includes(p[0])) return p[1]; } catch(e) {}
     return null;
   };
-  const parseXml = (xml) => {
-    const doc=new DOMParser().parseFromString(xml,'text/xml');
-    return [...doc.querySelectorAll('text')].map((n,i)=>({index:i+1,start:Number(n.getAttribute('start')||0),duration:Number(n.getAttribute('dur')||0),text:(n.textContent||'').replace(/\s+/g,' ').trim()})).filter(x=>x.text);
+  const getInputValue = () => {
+    const selectors = [
+      '#youtube-url textarea', '#youtube-url input',
+      'textarea[placeholder*="YouTube"]', 'input[placeholder*="YouTube"]',
+      'textarea[aria-label*="YouTube"]', 'input[aria-label*="YouTube"]'
+    ];
+    for(const sel of selectors){ const el=document.querySelector(sel); if(el?.value?.trim()) return el.value.trim(); }
+    const all=[...document.querySelectorAll('textarea,input')];
+    const hit=all.find(el=>/youtube\.com|youtu\.be/.test(el.value||''));
+    return hit?.value?.trim()||'';
   };
-  const parseJson3 = (data) => {
-    const events=data.events||[]; const out=[];
-    for(const e of events){ const text=(e.segs||[]).map(s=>s.utf8||'').join('').replace(/\s+/g,' ').trim(); if(text&&e.tStartMs!=null) out.push({index:out.length+1,start:Number(e.tStartMs)/1000,duration:Number(e.dDurationMs||0)/1000,text}); }
-    return out;
-  };
-  const render = () => {
-    const box=$('client-transcript'); if(!box) return;
-    if(!state.segments.length){ box.innerHTML='<div class="transcript-panel"><div class="transcript-head">📝 English transcript</div><div style="padding:18px;color:#64748b">Chưa có transcript.</div></div>'; return; }
-    box.innerHTML='<div class="transcript-panel"><div class="transcript-head">📝 Transcript · '+state.segments.length+' câu</div><div class="transcript-list">'+state.segments.map((x,i)=>`<button class="tline" data-index="${i}"><span class="tstamp">${time(x.start)}</span><span class="ttext">${esc(x.text)}</span></button>`).join('')+'</div></div>';
-    box.querySelectorAll('.tline').forEach(b=>b.addEventListener('click',()=>seek(state.segments[Number(b.dataset.index)].start)));
-  };
-  const frame = () => $('englishlab-youtube');
+  const getLang = () => byId('client-lang')?.querySelector('input')?.value || document.querySelector('#client-lang input')?.value || 'en';
+  const parseXml = (xml) => { const doc=new DOMParser().parseFromString(xml,'text/xml'); return [...doc.querySelectorAll('text')].map((n,i)=>({index:i+1,start:Number(n.getAttribute('start')||0),duration:Number(n.getAttribute('dur')||0),text:(n.textContent||'').replace(/\s+/g,' ').trim()})).filter(x=>x.text); };
+  const parseJson3 = (data) => { const out=[]; for(const e of (data.events||[])){const text=(e.segs||[]).map(s=>s.utf8||'').join('').replace(/\s+/g,' ').trim();if(text&&e.tStartMs!=null)out.push({index:out.length+1,start:Number(e.tStartMs)/1000,duration:Number(e.dDurationMs||0)/1000,text});} return out; };
+  const render = () => { const box=byId('client-transcript'); if(!box)return; if(!state.segments.length){box.innerHTML='<div class="transcript-panel"><div class="transcript-head">📝 English transcript</div><div style="padding:18px;color:#64748b">Chưa có transcript.</div></div>';return;} box.innerHTML='<div class="transcript-panel"><div class="transcript-head">📝 Transcript · '+state.segments.length+' câu</div><div class="transcript-list">'+state.segments.map((x,i)=>`<button class="tline" data-index="${i}"><span class="tstamp">${time(x.start)}</span><span class="ttext">${esc(x.text)}</span></button>`).join('')+'</div></div>'; box.querySelectorAll('.tline').forEach(b=>b.addEventListener('click',()=>seek(state.segments[Number(b.dataset.index)].start))); };
+  const frame = () => byId('englishlab-youtube');
   const command = (func,args=[]) => { const f=frame(); if(f?.contentWindow) f.contentWindow.postMessage(JSON.stringify({event:'command',func,args}),'*'); };
   const seek = (seconds) => { command('seekTo',[Number(seconds)||0,true]); command('playVideo'); };
-  const current = (cb) => { const f=frame(); if(!f?.contentWindow) return; const listener=(e)=>{if(e.source!==f.contentWindow||typeof e.data!=='string')return;try{const d=JSON.parse(e.data);if(typeof d?.info?.currentTime==='number'){window.removeEventListener('message',listener);cb(d.info.currentTime);}}catch(_){} }; window.addEventListener('message',listener); command('getCurrentTime'); setTimeout(()=>window.removeEventListener('message',listener),500); };
-  const highlight = (t) => { const rows=[...document.querySelectorAll('.tline')]; let idx=-1; for(let i=0;i<state.segments.length;i++){const a=state.segments[i].start,b=i+1<state.segments.length?state.segments[i+1].start:Infinity;if(t>=a&&t<b){idx=i;break;}} rows.forEach((r,i)=>r.classList.toggle('active',i===idx)); if(idx>=0) rows[idx].scrollIntoView({block:'nearest',behavior:'smooth'}); };
+  const current = (cb) => { const f=frame(); if(!f?.contentWindow)return; const listener=(e)=>{if(e.source!==f.contentWindow||typeof e.data!=='string')return;try{const d=JSON.parse(e.data);if(typeof d?.info?.currentTime==='number'){window.removeEventListener('message',listener);cb(d.info.currentTime);}}catch(_){}};window.addEventListener('message',listener);command('getCurrentTime');setTimeout(()=>window.removeEventListener('message',listener),500); };
+  const highlight = (t) => { const rows=[...document.querySelectorAll('.tline')]; let idx=-1; for(let i=0;i<state.segments.length;i++){const a=state.segments[i].start,b=i+1<state.segments.length?state.segments[i+1].start:Infinity;if(t>=a&&t<b){idx=i;break;}} rows.forEach((r,i)=>r.classList.toggle('active',i===idx)); if(idx>=0)rows[idx].scrollIntoView({block:'nearest',behavior:'smooth'}); };
   const fetchCaptions = async () => {
-    const input=document.querySelector('textarea, input');
-    const candidates=[...document.querySelectorAll('input')].map(x=>x.value).filter(Boolean);
-    const url=candidates.find(x=>x.includes('youtube.com')||x.includes('youtu.be')) || '';
-    const vid=getId(url); if(!vid){status('❌ Không tìm thấy YouTube URL/Video ID trong ô nhập.');return;}
-    const lang=document.querySelector('select')?.value||'en'; state.videoId=vid; status('⏳ Đang lấy caption trực tiếp từ YouTube trên trình duyệt…');
+    const raw=getInputValue(); const vid=getId(raw) || getId(document.querySelector('.yt-wrap')?.dataset.videoId||'');
+    if(!vid){status('❌ Không tìm thấy YouTube URL/Video ID. Hãy nhập URL đầy đủ hoặc 11 ký tự Video ID.');return;}
+    const lang=getLang(); state.videoId=vid; status('⏳ Browser đang yêu cầu caption của YouTube cho '+vid+'…');
     try {
-      const body={context:{client:{hl:lang==='auto'?'en':lang,gl:'US',clientName:'WEB',clientVersion:'2.20260820.01.00'}} ,videoId:vid};
+      const body={context:{client:{hl:lang==='auto'?'en':lang,gl:'US',clientName:'WEB',clientVersion:'2.20260820.01.00'}},videoId:vid};
       const r=await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-      if(!r.ok) throw new Error('YouTube player request HTTP '+r.status);
+      if(!r.ok)throw new Error('YouTube player HTTP '+r.status);
       const data=await r.json(); const tracks=data?.captions?.playerCaptionsTracklistRenderer?.captionTracks||[]; state.tracks=tracks;
-      if(!tracks.length) throw new Error('YouTube không trả về captionTracks cho video này. Có thể video không có phụ đề hoặc YouTube yêu cầu đăng nhập.');
-      let track=tracks.find(t=>(t.languageCode||'').toLowerCase()===(lang||'en').toLowerCase()) || tracks.find(t=>(t.languageCode||'').toLowerCase().startsWith((lang||'en').toLowerCase())) || tracks[0];
-      status('⏳ Đã tìm thấy caption '+(track.languageCode||'')+' · đang tải transcript…');
+      if(!tracks.length)throw new Error('Không có captionTracks được YouTube trả về.');
+      const wanted=(lang||'en').toLowerCase(); let track=lang==='auto'?tracks[0]:tracks.find(t=>(t.languageCode||'').toLowerCase()===wanted)||tracks.find(t=>(t.languageCode||'').toLowerCase().startsWith(wanted))||tracks[0];
       const u=new URL(track.baseUrl); u.searchParams.set('fmt','json3');
       let cr=await fetch(u.toString(),{credentials:'omit'}); let segments=[];
-      if(cr.ok){ const ct=cr.headers.get('content-type')||''; if(ct.includes('json')){segments=parseJson3(await cr.json());} else {segments=parseXml(await cr.text());} }
-      if(!segments.length){ cr=await fetch(track.baseUrl,{credentials:'omit'}); if(cr.ok) segments=parseXml(await cr.text()); }
-      if(!segments.length) throw new Error('Đã tìm thấy caption track nhưng không đọc được nội dung.');
-      state.segments=segments; render(); status('✅ Lấy transcript trực tiếp thành công · '+segments.length+' câu · ngôn ngữ '+(track.languageCode||''));
-    } catch(e) { status('❌ Browser transcript: '+e.message+' — nếu trình duyệt chặn CORS, hãy dùng Import SRT/VTT/JSON.'); }
+      if(cr.ok){const ct=cr.headers.get('content-type')||'';segments=ct.includes('json')?parseJson3(await cr.json()):parseXml(await cr.text());}
+      if(!segments.length){cr=await fetch(track.baseUrl,{credentials:'omit'});if(cr.ok)segments=parseXml(await cr.text());}
+      if(!segments.length)throw new Error('Caption track tồn tại nhưng browser không đọc được nội dung.');
+      state.segments=segments;render();status('✅ Transcript đã lấy trên trình duyệt · '+segments.length+' câu · '+(track.languageCode||''));
+    }catch(e){status('❌ Browser transcript: '+e.message+' — nếu lỗi CORS, hãy dùng SRT/VTT/JSON.');}
   };
   window.englishLabSeek=seek; window.englishLabFetchTranscript=fetchCaptions;
   setInterval(()=>current(highlight),1200);
-  setTimeout(()=>{ const b=$('client-fetch'); if(b)b.addEventListener('click',fetchCaptions); },300);
+  const wire=()=>{const b=byId('client-fetch');if(b&&!b.dataset.wired){b.dataset.wired='1';b.addEventListener('click',fetchCaptions);}};
+  wire(); new MutationObserver(wire).observe(document.body,{childList:true,subtree:true});
 }'''
 
 with gr.Blocks(title=APP_TITLE, css=CSS, js=JS, theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🎧 English Lab\nLuyện nghe · đọc · phát âm với video YouTube và transcript")
     with gr.Row():
-        url = gr.Textbox(label="YouTube URL hoặc Video ID", value=DEFAULT_URL, scale=5)
+        url = gr.Textbox(label="YouTube URL hoặc Video ID", value=DEFAULT_URL, elem_id="youtube-url", scale=5)
         embed = gr.Button("🎬 Nhúng video", variant="primary", scale=1)
     with gr.Row():
-        lang = gr.Dropdown(["en", "vi", "ja", "ko", "zh", "auto"], value="en", label="Ngôn ngữ transcript", scale=1, elem_id="client-lang")
-        get_transcript = gr.Button("🚀 Lấy transcript trên trình duyệt", variant="primary", scale=2, elem_id="client-fetch")
+        lang = gr.Dropdown(["en", "vi", "ja", "ko", "zh", "auto"], value="en", label="Ngôn ngữ transcript", elem_id="client-lang", scale=1)
+        get_transcript = gr.Button("🚀 Lấy transcript trên trình duyệt", variant="primary", elem_id="client-fetch", scale=2)
     status = gr.Markdown("Sẵn sàng — transcript sẽ được request trực tiếp từ trình duyệt của bạn.", elem_id="client-status")
     player = gr.HTML(value=player_html("vxtvWovNKKE"), label="Video lesson")
     gr.HTML('<div id="client-transcript"><div class="transcript-panel"><div class="transcript-head">📝 English transcript</div><div style="padding:18px;color:#64748b">Bấm “Lấy transcript trên trình duyệt”.</div></div></div>')
@@ -142,7 +138,6 @@ with gr.Blocks(title=APP_TITLE, css=CSS, js=JS, theme=gr.themes.Soft()) as demo:
     parsed = gr.Code(label="🔬 Parsed segments", language="json", lines=10)
 
     embed.click(load_video, url, [status, player])
-    # Keep manual import as a server-side fallback; browser retrieval is the primary path.
     def manual_import(file_obj, text_value):
         raw=text_value or ""
         if file_obj:
