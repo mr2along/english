@@ -9,11 +9,12 @@ from urllib.parse import parse_qs, urlparse, quote
 import gradio as gr
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import WebshareProxyConfig
+from youtube_transcript_api.proxies import GenericProxyConfig
 
-# Hugging Face Space secrets (exact names configured in the Space)
-WEBSHARE_USERNAME = os.getenv("WEBshare_PROXY_USERNAME", "").strip()
-WEBSHARE_PASSWORD = os.getenv("WEBshare_PROXY_PASSWORD", "").strip()
+WEBSHARE_USERNAME = os.getenv("WEBSHARE_USERNAME", "").strip()
+WEBSHARE_PASSWORD = os.getenv("WEBSHARE_PASSWORD", "").strip()
+WEBSHARE_PROXY_HOST = os.getenv("WEBSHARE_PROXY_HOST", "p.webshare.io").strip()
+WEBSHARE_PROXY_PORT = os.getenv("WEBSHARE_PROXY_PORT", "80").strip()
 TRANSCRIPT_LIST_TIMEOUT = int(os.getenv("TRANSCRIPT_LIST_TIMEOUT", "45"))
 TRANSCRIPT_FETCH_TIMEOUT = int(os.getenv("TRANSCRIPT_FETCH_TIMEOUT", "90"))
 PROXY_TEST_TIMEOUT = int(os.getenv("PROXY_TEST_TIMEOUT", "15"))
@@ -39,20 +40,23 @@ def extract_video_id(value: str):
 
 
 def make_proxy_url():
-    if not (WEBSHARE_USERNAME and WEBSHARE_PASSWORD):
+    if not (WEBSHARE_USERNAME and WEBSHARE_PASSWORD and WEBSHARE_PROXY_HOST and WEBSHARE_PROXY_PORT):
         return None
     user = quote(WEBSHARE_USERNAME, safe="")
     password = quote(WEBSHARE_PASSWORD, safe="")
-    return f"http://{user}:{password}@p.webshare.io:80/"
+    return f"http://{user}:{password}@{WEBSHARE_PROXY_HOST}:{WEBSHARE_PROXY_PORT}/"
 
 
 def test_proxy():
     proxy_url = make_proxy_url()
     if not proxy_url:
-        return False, "credentials not configured"
-    proxies = {"http": proxy_url, "https": proxy_url}
+        return False, "credentials/host/port not configured"
     try:
-        response = requests.get("https://ipv4.webshare.io/", proxies=proxies, timeout=PROXY_TEST_TIMEOUT)
+        response = requests.get(
+            "https://ipv4.webshare.io/",
+            proxies={"http": proxy_url, "https": proxy_url},
+            timeout=PROXY_TEST_TIMEOUT,
+        )
         response.raise_for_status()
         return True, response.text.strip()[:200]
     except Exception as exc:
@@ -61,12 +65,14 @@ def test_proxy():
 
 def make_api():
     print("[TRANSCRIPT] Creating YouTubeTranscriptApi client...", flush=True)
-    if WEBSHARE_USERNAME and WEBSHARE_PASSWORD:
+    proxy_url = make_proxy_url()
+    if proxy_url:
         print("[TRANSCRIPT] Webshare credentials: configured", flush=True)
+        print(f"[TRANSCRIPT] Webshare endpoint: {WEBSHARE_PROXY_HOST}:{WEBSHARE_PROXY_PORT}", flush=True)
         return YouTubeTranscriptApi(
-            proxy_config=WebshareProxyConfig(
-                proxy_username=WEBSHARE_USERNAME,
-                proxy_password=WEBSHARE_PASSWORD,
+            proxy_config=GenericProxyConfig(
+                http_url=proxy_url,
+                https_url=proxy_url,
             )
         )
     print("[TRANSCRIPT] Webshare credentials: NOT configured; using direct connection", flush=True)
@@ -107,29 +113,29 @@ def get_transcript(url: str):
 
     line(f"▶ Bắt đầu tải transcript — video_id={video_id}")
     yield state("⏳ Đang chuẩn bị tải transcript...")
-
     line("🔧 Khởi tạo YouTubeTranscriptApi + Webshare proxy")
     yield state("⏳ Đã khởi tạo client; chuẩn bị kiểm tra proxy...")
 
     try:
         api = make_api()
-        if WEBSHARE_USERNAME and WEBSHARE_PASSWORD:
+        proxy_url = make_proxy_url()
+        if proxy_url:
             line("🔐 Proxy: Webshare")
+            line(f"🌐 Endpoint: {WEBSHARE_PROXY_HOST}:{WEBSHARE_PROXY_PORT}")
             line(f"🌐 Kiểm tra Webshare connectivity... (timeout {PROXY_TEST_TIMEOUT}s)")
             yield state("🌐 Đang kiểm tra kết nối Webshare...")
             ok, detail = test_proxy()
             if not ok:
                 line(f"❌ Webshare connectivity failed: {detail}")
-                yield state("❌ Webshare proxy không kết nối được. Xem log để kiểm tra credential/network.")
+                yield state("❌ Webshare proxy không kết nối được. Xem log để kiểm tra credential/host/port/network.")
                 return
             line(f"✅ Webshare connectivity OK: {detail}")
         else:
-            line("🔐 Proxy: direct — Webshare credentials chưa được nạp vào runtime")
-            yield state("⚠️ Chưa thấy Webshare credentials trong runtime; đang dùng direct connection...")
+            line("🔐 Proxy: direct — Webshare configuration chưa được nạp vào runtime")
+            yield state("⚠️ Chưa thấy Webshare configuration trong runtime; đang dùng direct connection...")
 
         line(f"🌐 Gọi YouTube API: list(video_id)... (timeout {TRANSCRIPT_LIST_TIMEOUT}s)")
         yield state("🌐 Đang gọi YouTube API list() — nếu quá thời gian sẽ báo timeout...")
-
         transcript_list = _call_with_timeout(lambda: api.list(video_id), TRANSCRIPT_LIST_TIMEOUT)
         line("✅ Nhận danh sách transcript từ YouTube")
         yield state("🔎 Đã nhận danh sách transcript; đang phân tích ngôn ngữ...")
@@ -137,9 +143,7 @@ def get_transcript(url: str):
         selected = None
         available = []
         for t in transcript_list:
-            available.append(
-                f"{t.language_code}{' (translated)' if getattr(t, 'is_translatable', False) else ''}"
-            )
+            available.append(f"{t.language_code}{' (translated)' if getattr(t, 'is_translatable', False) else ''}")
         if available:
             line("📋 Transcript khả dụng: " + ", ".join(available))
         else:
@@ -180,14 +184,12 @@ def get_transcript(url: str):
         for index, item in enumerate(data, 1):
             text = re.sub(r"\s+", " ", item.text).strip()
             if text:
-                lines.append(
-                    {
-                        "index": index,
-                        "start": float(getattr(item, "start", 0.0)),
-                        "duration": float(getattr(item, "duration", 0.0)),
-                        "text": text,
-                    }
-                )
+                lines.append({
+                    "index": index,
+                    "start": float(getattr(item, "start", 0.0)),
+                    "duration": float(getattr(item, "duration", 0.0)),
+                    "text": text,
+                })
             if index == 1 or index % 50 == 0 or index == len(data):
                 line(f"📝 Xử lý segment {index}/{len(data)}")
                 yield state(f"📝 Đang xử lý segment {index}/{len(data)}...")
@@ -199,13 +201,9 @@ def get_transcript(url: str):
 
         timestamp_payload = json.dumps(lines, ensure_ascii=False)
         transcript = "\n".join(f"[{item['start']:.2f}s] {item['text']}" for item in lines)
-
         line(f"🎉 Hoàn tất: {len(lines)} câu/segment, {len(transcript):,} ký tự")
         line(f"⏱ Tổng thời gian: {time.time() - started:.2f}s")
-        yield state(
-            "✅ Transcript đã tải xong — timestamp đã được giữ lại để đồng bộ player.",
-            transcript,
-        )
+        yield state("✅ Transcript đã tải xong — timestamp đã được giữ lại để đồng bộ player.", transcript)
 
     except Exception as exc:
         msg = str(exc)
@@ -220,26 +218,13 @@ def get_transcript(url: str):
 with gr.Blocks(title="English Lab — YouTube Transcript") as demo:
     gr.Markdown("# 🎧 English Lab — YouTube Transcript")
     gr.Markdown("**youtube-transcript-api + Webshare Proxy** — kiểm tra proxy trước, log tiến trình trực tiếp, giữ timestamp để đồng bộ player.")
-
     with gr.Row():
-        url = gr.Textbox(
-            label="YouTube URL hoặc Video ID",
-            placeholder="https://www.youtube.com/watch?v=vxtvWovNKKE",
-            scale=5,
-        )
+        url = gr.Textbox(label="YouTube URL hoặc Video ID", placeholder="https://www.youtube.com/watch?v=vxtvWovNKKE", scale=5)
         button = gr.Button("🚀 Lấy English Transcript", variant="primary", scale=2)
-
     status = gr.Markdown("Sẵn sàng.")
     output = gr.Textbox(label="English Transcript + timestamp", lines=24, show_copy_button=True)
-    progress_log = gr.Textbox(
-        label="🔎 Log tiến trình tải transcript (live)",
-        lines=14,
-        max_lines=30,
-        show_copy_button=True,
-        interactive=False,
-    )
+    progress_log = gr.Textbox(label="🔎 Log tiến trình tải transcript (live)", lines=14, max_lines=30, show_copy_button=True, interactive=False)
     timestamp_payload = gr.Textbox(label="Timestamp data (machine-readable)", visible=False)
-
     button.click(get_transcript, inputs=url, outputs=[status, output, progress_log, timestamp_payload])
     url.submit(get_transcript, inputs=url, outputs=[status, output, progress_log, timestamp_payload])
 
