@@ -1,3 +1,15 @@
+---
+title: English Learning Lab
+emoji: 🎧
+colorFrom: blue
+colorTo: purple
+sdk: gradio
+sdk_version: "5.44.1"
+python_version: "3.10"
+app_file: app.py
+pinned: false
+---
+
 # English Learning Lab
 
 A professional YouTube-based English listening, shadowing, pronunciation, grammar, vocabulary and progress-learning app designed for Hugging Face Spaces.
@@ -13,6 +25,7 @@ A professional YouTube-based English listening, shadowing, pronunciation, gramma
 - Pronunciation/text similarity scoring
 - SQLite learning progress
 - Responsive mobile-first UI
+- Tactiq + Playwright Async transcript extraction
 
 ## Run
 
@@ -21,11 +34,4 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Optional environment variables:
-
-- `AI_API_KEY`
-- `AI_BASE_URL`
-- `AI_MODEL`
-- `WHISPER_MODEL`
-
-The default lesson playlist is configurable in the UI.
+The app uses Playwright Async to access the Tactiq YouTube transcript page. No yt-dlp is required.
