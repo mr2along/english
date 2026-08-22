@@ -1,0 +1,39 @@
+name: Import AutoSubs Space
+
+on:
+  workflow_dispatch:
+
+jobs:
+  import-autosubs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout English Lab
+        uses: actions/checkout@v4
+
+      - name: Clone AutoSubs Space
+        run: |
+          rm -rf autosubs-source
+          git clone --depth 1 https://huggingface.co/spaces/Mrlongpro/autosubs autosubs-source
+          rm -rf autosubs-source/.git
+
+      - name: Create source archive
+        run: |
+          zip -r autosubs-source.zip autosubs-source -x 'autosubs-source/.cache/*'
+          ls -lh autosubs-source.zip
+
+      - name: Inspect source tree
+        run: |
+          echo '=== AutoSubs files ==='
+          find autosubs-source -maxdepth 3 -type f | sort
+          echo '=== Top-level files ==='
+          ls -la autosubs-source
+
+      - name: Commit imported source and archive
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add autosubs-source autosubs-source.zip
+          git diff --cached --quiet || git commit -m "chore: import AutoSubs Space source"
+          git push
