@@ -168,12 +168,11 @@ def _http_transcript_fallback(vid, log):
                 if events:
                     return events
             else:
-                import html as htmlmod
                 import xml.etree.ElementTree as ET
                 root = ET.fromstring(rr.text)
                 events = []
                 for tr in root.findall(".//text"):
-                    text = htmlmod.unescape("".join(tr.itertext())).strip()
+                    text = html.unescape("".join(tr.itertext())).strip()
                     if text:
                         events.append({"start": float(tr.attrib.get("start", "0")), "duration": float(tr.attrib.get("dur", "0")), "text": text})
                 if events:
@@ -186,187 +185,153 @@ def _http_transcript_fallback(vid, log):
 def normalize_segments(data):
     lines = []
     for i, item in enumerate(data, 1):
-        text = re.sub(r"\s+", " ", str(item.get("text", getattr(item, "text", "")))).strip()
+        if hasattr(item, "text"):
+            text = item.text
+            start = item.start
+            duration = item.duration
+        else:
+            text = item.get("text", "")
+            start = item.get("start", 0)
+            duration = item.get("duration", 0)
+        text = re.sub(r"\s+", " ", str(text)).strip()
         if text:
-            lines.append({
-                "index": i,
-                "start": float(item.get("start", getattr(item, "start", 0.0))),
-                "duration": float(item.get("duration", getattr(item, "duration", 0.0))),
-                "text": text,
-            })
+            lines.append({"index": i, "start": float(start), "duration": float(duration), "text": text})
     return lines
 
 
 def build_player(vid, lines):
-    """Build a self-contained YouTube iframe + timestamp transcript controller."""
     data = html.escape(json.dumps(lines, ensure_ascii=False), quote=True)
     safe_vid = html.escape(vid, quote=True)
-    return f'''<div id="english-lab-player" data-video-id="{safe_vid}" data-lines="{data}">
+    return f'''<div id="english-lab-player" class="el-shell" data-video-id="{safe_vid}" data-lines="{data}">
 <style>
-#english-lab-player {{ font-family:system-ui,sans-serif; }}
-.el-video {{ width:100%; aspect-ratio:16/9; background:#000; border-radius:12px; overflow:hidden; }}
-.el-video iframe {{ width:100%; height:100%; border:0; }}
-.el-toolbar {{ display:flex; gap:8px; align-items:center; margin:10px 0; flex-wrap:wrap; }}
-.el-hint {{ font-size:13px; opacity:.75; }}
-.el-lines {{ max-height:420px; overflow:auto; display:flex; flex-direction:column; gap:5px; }}
-.el-line {{ text-align:left; border:1px solid #ddd; border-radius:8px; padding:8px 10px; background:transparent; cursor:pointer; }}
-.el-line:hover {{ background:#f3f4f6; }}
-.el-line.active {{ outline:2px solid #4f46e5; background:#eef2ff; }}
-.el-time {{ display:inline-block; min-width:55px; font-family:monospace; opacity:.7; margin-right:7px; }}
+.el-shell{{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172033}}
+.el-grid{{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(300px,.8fr);gap:18px}}
+.el-card{{background:rgba(255,255,255,.98);border:1px solid #e6eaf0;border-radius:18px;box-shadow:0 8px 30px rgba(20,35,60,.07);overflow:hidden}}
+.el-video{{aspect-ratio:16/9;background:#080b10}}
+.el-video iframe{{width:100%;height:100%;border:0;display:block}}
+.el-head{{padding:14px 16px;border-bottom:1px solid #edf0f4;display:flex;align-items:center;justify-content:space-between;gap:10px}}
+.el-title{{font-weight:750;font-size:16px}} .el-sub{{font-size:12px;color:#748096;margin-top:2px}}
+.el-transcript{{height:calc(min(66vh,620px));overflow:auto;padding:10px}}
+.el-line{{display:flex;width:100%;gap:10px;text-align:left;border:0;border-radius:12px;background:transparent;padding:10px 11px;margin:2px 0;cursor:pointer;color:#263247;line-height:1.45;font-size:14px}}
+.el-line:hover{{background:#f5f7fb}} .el-line.active{{background:#eaf1ff;box-shadow:inset 3px 0 0 #2563eb}}
+.el-time{{font:600 11px ui-monospace,SFMono-Regular,Menlo,monospace;color:#718096;min-width:45px;padding-top:2px}}
+.el-text{{flex:1}} .el-num{{color:#a0a9b8;font-size:11px;margin-right:4px}}
+.el-tools{{display:flex;gap:8px;flex-wrap:wrap;padding:12px 16px;border-top:1px solid #edf0f4}}
+.el-btn{{border:1px solid #dce2ea;background:#fff;border-radius:10px;padding:8px 12px;font-weight:650;cursor:pointer}}
+.el-btn.primary{{background:#2563eb;color:#fff;border-color:#2563eb}}
+.el-tip{{padding:10px 16px;font-size:12px;color:#69768a;background:#f8fafc}}
+@media(max-width:850px){{.el-grid{{grid-template-columns:1fr}}.el-transcript{{height:420px}}}}
 </style>
-<div class="el-video"><iframe id="el-youtube-frame" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>
-<div class="el-toolbar"><button id="el-play-current" type="button">▶ Câu hiện tại</button><button id="el-top" type="button">↥ Về đầu</button><span class="el-hint">Bấm trực tiếp vào câu để YouTube nhảy đúng timestamp.</span></div>
-<div id="el-lines" class="el-lines"></div>
+<div class="el-grid">
+  <section class="el-card">
+    <div class="el-head"><div><div class="el-title">🎬 Video lesson</div><div class="el-sub">Click any sentence to jump to its exact timestamp</div></div><div id="el-count" class="el-sub"></div></div>
+    <div class="el-video"><iframe id="el-youtube-frame" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>
+    <div class="el-tools"><button id="el-play" class="el-btn primary">▶ Phát câu hiện tại</button><button id="el-replay" class="el-btn">↺ Phát lại câu</button><button id="el-top" class="el-btn">↑ Về đầu</button></div>
+    <div class="el-tip">💡 Mẹo: chọn một câu → nghe → đọc theo → chọn lại câu để luyện nhiều lần.</div>
+  </section>
+  <section class="el-card">
+    <div class="el-head"><div><div class="el-title">📝 English transcript</div><div class="el-sub">Timestamp synchronized with video</div></div></div>
+    <div id="el-lines" class="el-transcript"></div>
+  </section>
+</div>
 <script>
-(function() {{
-  const root=document.getElementById('english-lab-player');
-  if(!root) return;
-  const vid=root.dataset.videoId;
-  let lines=[];
-  try {{ lines=JSON.parse(root.dataset.lines || '[]'); }} catch(e) {{ console.error(e); }}
-  const frame=document.getElementById('el-youtube-frame');
-  const origin=window.location.origin;
-  frame.src='https://www.youtube.com/embed/'+encodeURIComponent(vid)+'?enablejsapi=1&playsinline=1&rel=0&origin='+encodeURIComponent(origin);
-  const list=document.getElementById('el-lines');
-  const buttons=[];
-  const fmt=t => {{ t=Math.max(0,Number(t)||0); const m=Math.floor(t/60); const s=Math.floor(t%60); return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0'); }};
-  function command(func,args) {{
-    try {{ frame.contentWindow.postMessage(JSON.stringify({{event:'command',func:func,args:args||[]}}),'*'); }} catch(e) {{ console.error(e); }}
-  }}
-  function seek(start) {{ command('seekTo',[Number(start)||0,true]); command('playVideo',[]); }}
-  lines.forEach((x,i)=>{{
-    const b=document.createElement('button'); b.type='button'; b.className='el-line';
-    const t=document.createElement('span'); t.className='el-time'; t.textContent=fmt(x.start);
-    b.appendChild(t); b.appendChild(document.createTextNode(x.text));
-    b.addEventListener('click',()=>seek(x.start)); list.appendChild(b); buttons.push(b);
-  }});
-  document.getElementById('el-top').onclick=()=>seek(0);
-  document.getElementById('el-play-current').onclick=()=>{{
-    const active=list.querySelector('.active');
-    const i=active ? buttons.indexOf(active) : 0;
-    seek(lines[Math.max(0,i)]?.start||0);
-  }};
-  function requestTime() {{ command('getCurrentTime',[]); }}
-  window.addEventListener('message',ev=>{{
-    if(!ev.data || typeof ev.data!=='string') return;
-    let d; try {{ d=JSON.parse(ev.data); }} catch(e) {{ return; }}
-    const ct=d?.info?.currentTime ?? d?.infoDelivery?.currentTime;
-    if(typeof ct!=='number') return;
-    let active=-1;
-    for(let i=0;i<lines.length;i++) {{
-      const start=Number(lines[i].start)||0;
-      const next=i+1<lines.length ? Number(lines[i+1].start)||start : Infinity;
-      if(ct>=start && ct<next) {{ active=i; break; }}
-    }}
-    buttons.forEach((b,i)=>b.classList.toggle('active',i===active));
-    if(active>=0 && buttons[active]) buttons[active].scrollIntoView({{block:'nearest'}});
-  }});
-  setInterval(requestTime,500);
+(function(){{
+ const root=document.getElementById('english-lab-player'); if(!root)return;
+ const vid=root.dataset.videoId; let lines=[]; try{{lines=JSON.parse(root.dataset.lines||'[]')}}catch(e){{}}
+ const frame=document.getElementById('el-youtube-frame');
+ frame.src='https://www.youtube.com/embed/'+encodeURIComponent(vid)+'?enablejsapi=1&playsinline=1&rel=0&origin='+encodeURIComponent(location.origin);
+ const list=document.getElementById('el-lines'), buttons=[]; let active=-1;
+ const fmt=t=>{{t=Math.max(0,Number(t)||0);const m=Math.floor(t/60),s=Math.floor(t%60);return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0')}};
+ document.getElementById('el-count').textContent=lines.length+' sentences';
+ function cmd(func,args){{try{{frame.contentWindow.postMessage(JSON.stringify({{event:'command',func,args:args||[]}}),'*')}}catch(e){{}}}}
+ function seek(t){{cmd('seekTo',[Number(t)||0,true]);cmd('playVideo',[]);}}
+ lines.forEach((x,i)=>{{const b=document.createElement('button');b.className='el-line';b.type='button';
+  b.innerHTML='<span class="el-time">'+fmt(x.start)+'</span><span class="el-text"><span class="el-num">#'+(i+1)+'</span>'+String(x.text).replace(/[&<>]/g,m=>({{'&':'&amp;','<':'&lt;','>':'&gt;'}}[m]))+'</span>';
+  b.onclick=()=>seek(x.start);list.appendChild(b);buttons.push(b);
+ }});
+ function setActive(i){{if(i===active)return;active=i;buttons.forEach((b,j)=>b.classList.toggle('active',j===i));if(i>=0)buttons[i]?.scrollIntoView({{block:'nearest',behavior:'smooth'}})}}
+ function current(t){{let i=-1;for(let j=0;j<lines.length;j++){{const a=+lines[j].start||0,b=j+1<lines.length?(+lines[j+1].start||a):Infinity;if(t>=a&&t<b){{i=j;break}}}}return i}}
+ window.addEventListener('message',e=>{{if(typeof e.data!=='string')return;let d;try{{d=JSON.parse(e.data)}}catch(_){{return}};const t=d?.info?.currentTime??d?.infoDelivery?.currentTime;if(typeof t==='number')setActive(current(t))}});
+ document.getElementById('el-play').onclick=()=>seek(lines[Math.max(active,0)]?.start||0);
+ document.getElementById('el-replay').onclick=()=>{{if(active>=0)seek(lines[active].start)}};
+ document.getElementById('el-top').onclick=()=>seek(0);
+ setInterval(()=>cmd('getCurrentTime',[]),500);
 }})();
 </script></div>'''
 
 
 def get_transcript(url):
-    started = time.time()
-    logs = []
-    payload = ""
-    player = ""
-
+    started=time.time(); logs=[]; payload=""; player=""
     def log(msg):
-        x = f"[{time.time()-started:6.2f}s] {msg}"
-        logs.append(x)
-        print(f"[TRANSCRIPT] {x}", flush=True)
-
-    def state(status, text=""):
-        return status, text, "\n".join(logs), payload, player
-
-    vid = video_id(url)
+        x=f"[{time.time()-started:6.2f}s] {msg}"; logs.append(x); print(f"[TRANSCRIPT] {x}",flush=True)
+    def state(status,text=""): return status,text,"\n".join(logs),payload,player
+    vid=video_id(url)
     if not vid:
-        log("❌ YouTube URL/Video ID không hợp lệ")
-        yield state("❌ Link YouTube không hợp lệ.")
-        return
-
-    log(f"▶ Bắt đầu tải transcript — video_id={vid}")
-    yield state("⏳ Đang chuẩn bị...")
+        log("❌ YouTube URL/Video ID không hợp lệ"); yield state("❌ Link YouTube không hợp lệ."); return
+    log(f"▶ Bắt đầu tải transcript — video_id={vid}"); yield state("⏳ Đang chuẩn bị...")
     try:
-        p = proxy_url()
-        log("🔐 Proxy: Webshare" if p else "🔐 Proxy: direct")
+        p=proxy_url(); log("🔐 Proxy: Webshare" if p else "🔐 Proxy: direct")
         if p:
-            log(f"🌐 Endpoint: {HOST}:{PORT}")
-            yield state("🌐 Đang kiểm tra Webshare → YouTube...")
-            for item in diagnostic():
-                log(item)
+            log(f"🌐 Endpoint: {HOST}:{PORT}"); yield state("🌐 Đang kiểm tra Webshare → YouTube...")
+            for item in diagnostic(): log(item)
         try:
-            api = make_api()
-            log(f"🌐 Gọi YouTube API: list(video_id)... (timeout {LIST_TIMEOUT}s)")
-            yield state("🌐 Đang gọi YouTube API list()...")
-            tl = call_timeout(lambda: api.list(vid), LIST_TIMEOUT)
-            log("✅ Nhận danh sách transcript")
-            yield state("🔎 Đang chọn English transcript...")
-            available = [f"{t.language_code}{' (translated)' if getattr(t,'is_translatable',False) else ''}" for t in tl]
-            log("📋 Transcript khả dụng: " + (", ".join(available) if available else "rỗng"))
-            selected = next((t for t in tl if t.language_code in {"en", "en-US", "en-GB"}), None)
+            api=make_api(); log(f"🌐 Gọi YouTube API: list(video_id)... (timeout {LIST_TIMEOUT}s)"); yield state("🌐 Đang gọi YouTube API...")
+            tl=call_timeout(lambda:api.list(vid),LIST_TIMEOUT); log("✅ Nhận danh sách transcript"); yield state("🔎 Đang chọn English transcript...")
+            available=[t.language_code for t in tl]; log("📋 Transcript khả dụng: "+(", ".join(available) if available else "rỗng"))
+            selected=next((t for t in tl if t.language_code.lower() in {"en","en-us","en-gb"}),None)
             if selected is None:
                 for t in tl:
-                    if getattr(t, "is_translatable", False):
-                        try:
-                            selected = t.translate("en")
-                            log(f"🔄 Đã dịch {t.language_code} → en")
-                            break
-                        except Exception as e:
-                            log(f"⚠️ Dịch thất bại: {e}")
-            if selected is None:
-                raise RuntimeError("Video không có English transcript khả dụng.")
-            log(f"📥 Fetch timestamp + text... (timeout {FETCH_TIMEOUT}s)")
-            yield state("📥 Đang tải timestamp + text...")
-            data = call_timeout(selected.fetch, FETCH_TIMEOUT)
-            lines = normalize_segments(data)
-            log(f"✅ Fetch hoàn tất: {len(lines)} segment")
+                    if getattr(t,"is_translatable",False):
+                        try: selected=t.translate("en"); log(f"🔄 Đã dịch {t.language_code} → en"); break
+                        except Exception as e: log(f"⚠️ Dịch thất bại: {e}")
+            if selected is None: raise RuntimeError("Video không có English transcript khả dụng.")
+            log(f"📥 Fetch timestamp + text... (timeout {FETCH_TIMEOUT}s)"); yield state("📥 Đang tải timestamp + text...")
+            data=call_timeout(selected.fetch,FETCH_TIMEOUT); lines=normalize_segments(data); log(f"✅ Fetch hoàn tất: {len(lines)} segment")
         except Exception as primary:
-            log(f"⚠️ Backend youtube-transcript-api thất bại: {type(primary).__name__}: {primary}")
-            log("🔁 Chuyển sang HTTP caption fallback...")
-            yield state("🔁 Đang thử transcript backend thứ hai...")
-            lines = normalize_segments(_http_transcript_fallback(vid, log))
-            log(f"✅ Fallback hoàn tất: {len(lines)} segment")
-
-        if not lines:
-            raise RuntimeError("Transcript rỗng.")
-        for i in range(1, len(lines) + 1):
-            if i == 1 or i % 50 == 0 or i == len(lines):
-                log(f"📝 Xử lý segment {i}/{len(lines)}")
-        payload = json.dumps(lines, ensure_ascii=False)
-        transcript = "\n".join(f"[{x['start']:.2f}s] {x['text']}" for x in lines)
-        player = build_player(vid, lines)
-        log(f"🎬 Đã tạo YouTube Player + {len(lines)} nút timestamp")
-        log("🔗 Click câu → seekTo(timestamp) → playVideo")
-        log(f"🎉 Hoàn tất: {len(lines)} segment, {len(transcript):,} ký tự")
-        log(f"⏱ Tổng thời gian: {time.time()-started:.2f}s")
-        yield state("✅ Transcript đã tải xong — YouTube Player đã nối timestamp.", transcript)
+            log(f"⚠️ Backend youtube-transcript-api thất bại: {type(primary).__name__}: {primary}"); log("🔁 Chuyển sang HTTP caption fallback..."); yield state("🔁 Đang thử backend transcript dự phòng...")
+            lines=normalize_segments(_http_transcript_fallback(vid,log)); log(f"✅ Fallback hoàn tất: {len(lines)} segment")
+        if not lines: raise RuntimeError("Transcript rỗng.")
+        for i in range(1,len(lines)+1):
+            if i==1 or i%50==0 or i==len(lines): log(f"📝 Xử lý segment {i}/{len(lines)}")
+        payload=json.dumps(lines,ensure_ascii=False); transcript="\n".join(f"[{x['start']:.2f}s] {x['text']}" for x in lines); player=build_player(vid,lines)
+        log(f"🎬 Player + transcript UI: {len(lines)} câu"); log("🔗 Click câu → seekTo(timestamp) → playVideo"); log(f"🎉 Hoàn tất: {len(lines)} segment, {len(transcript):,} ký tự"); log(f"⏱ Tổng thời gian: {time.time()-started:.2f}s")
+        yield state("✅ Bài học đã sẵn sàng.",transcript)
     except Exception as e:
-        log(f"❌ LỖI: {type(e).__name__}: {e}")
-        traceback.print_exc()
-        yield state(f"❌ Không lấy được transcript cho {vid}.\n\n{type(e).__name__}: {e}")
+        log(f"❌ LỖI: {type(e).__name__}: {e}"); traceback.print_exc(); yield state(f"❌ Không lấy được transcript cho {vid}.\\n\\n{type(e).__name__}: {e}")
 
 
-with gr.Blocks(title="English Lab — YouTube Transcript") as demo:
-    gr.Markdown("# 🎧 English Lab — YouTube Transcript")
-    gr.Markdown("**Transcript timestamp ↔ YouTube Player — click câu để nhảy đúng thời điểm**")
-    with gr.Row():
-        url = gr.Textbox(label="YouTube URL hoặc Video ID", placeholder="https://www.youtube.com/watch?v=vxtvWovNKKE", scale=5)
-        button = gr.Button("🚀 Lấy English Transcript", variant="primary")
-    diag = gr.Button("🔬 Test Webshare → YouTube")
-    diag_out = gr.Textbox(label="Network diagnostic", lines=8, interactive=False)
-    status = gr.Markdown("Sẵn sàng.")
-    player_out = gr.HTML(label="YouTube Player + Transcript")
-    output = gr.Textbox(label="English Transcript + timestamp", lines=24, show_copy_button=True)
-    progress_log = gr.Textbox(label="🔎 Log tiến trình tải transcript", lines=18, max_lines=40, interactive=False, show_copy_button=True)
-    timestamp_payload = gr.Textbox(label="Timestamp data", visible=False)
+CSS="""
+:root{--el-blue:#2563eb;--el-bg:#f4f7fb}
+body{background:var(--el-bg)!important}
+.gradio-container{max-width:1180px!important;margin:auto!important;padding:18px!important}
+#app-header{border-radius:20px;padding:24px 26px;background:linear-gradient(135deg,#0f172a,#1e3a8a);color:white;box-shadow:0 12px 35px rgba(15,23,42,.16);margin-bottom:16px}
+#app-header h1{margin:0;font-size:30px}.header-sub{margin-top:7px;opacity:.82}
+#load-row{background:white;border:1px solid #e5e9f0;border-radius:16px;padding:14px;box-shadow:0 5px 20px rgba(20,35,60,.06)}
+#url-box textarea{border-radius:11px!important}.load-btn{border-radius:11px!important;font-weight:700!important}
+.status-box{border-radius:12px!important}
+#raw-output,#log-box{border-radius:14px!important}
+footer{display:none!important}
+@media(max-width:700px){.gradio-container{padding:10px!important}#app-header{padding:18px}.gradio-container h1{font-size:24px}}
+"""
 
-    diag.click(lambda: "\n".join(diagnostic()), outputs=diag_out)
-    button.click(get_transcript, inputs=url, outputs=[status, output, progress_log, timestamp_payload, player_out])
-    url.submit(get_transcript, inputs=url, outputs=[status, output, progress_log, timestamp_payload, player_out])
+with gr.Blocks(title="English Lab", css=CSS, theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"), fill_width=True) as demo:
+    gr.HTML('''<div id="app-header"><h1>🎧 English Lab</h1><div class="header-sub">Luyện nghe · đọc · phát âm với video YouTube — transcript đồng bộ theo từng câu</div></div>''')
+    with gr.Row(elem_id="load-row"):
+        url=gr.Textbox(label="YouTube URL hoặc Video ID", placeholder="Dán link YouTube vào đây…", scale=5, elem_id="url-box")
+        button=gr.Button("🚀 Tải bài học", variant="primary", scale=1, elem_classes=["load-btn"])
+    status=gr.Markdown("### 👋 Sẵn sàng\nDán một video YouTube rồi bấm **Tải bài học**.", elem_classes=["status-box"])
+    player_out=gr.HTML()
+    with gr.Accordion("🔧 Developer / Network diagnostics", open=False):
+        diag=gr.Button("🔬 Kiểm tra Webshare → YouTube")
+        diag_out=gr.Textbox(label="Network diagnostic", lines=7, interactive=False, show_copy_button=True)
+        progress_log=gr.Textbox(label="Log tiến trình tải transcript", lines=16, max_lines=40, interactive=False, show_copy_button=True, elem_id="log-box")
+    with gr.Accordion("📄 Transcript dạng text / export", open=False):
+        output=gr.Textbox(label="English Transcript + timestamp", lines=18, show_copy_button=True, elem_id="raw-output")
+        timestamp_payload=gr.Textbox(label="Timestamp JSON", visible=False)
+    diag.click(lambda:"\n".join(diagnostic()),outputs=diag_out)
+    button.click(get_transcript,inputs=url,outputs=[status,output,progress_log,timestamp_payload,player_out])
+    url.submit(get_transcript,inputs=url,outputs=[status,output,progress_log,timestamp_payload,player_out])
 
-
-if __name__ == "__main__":
-    print("[STARTUP] English Lab starting on 0.0.0.0:7860", flush=True)
-    demo.launch(server_name="0.0.0.0", server_port=7860, ssr_mode=False)
+if __name__=="__main__":
+    print("[STARTUP] English Lab starting on 0.0.0.0:7860",flush=True)
+    demo.launch(server_name="0.0.0.0",server_port=7860,ssr_mode=False)
