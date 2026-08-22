@@ -3,14 +3,16 @@ import re
 import time
 import traceback
 from urllib.parse import urlparse, parse_qs
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import gradio as gr
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import WebshareProxyConfig
 
-# Webshare credentials: move these to HF Secrets after testing.
-WEBSHARE_USERNAME = os.getenv("WEBSHARE_USERNAME", "uvhnvfjd")
-WEBSHARE_PASSWORD = os.getenv("WEBSHARE_PASSWORD", "ze82v8cwwxpa")
+WEBSHARE_USERNAME = os.getenv("WEBSHARE_USERNAME", "").strip()
+WEBSHARE_PASSWORD = os.getenv("WEBSHARE_PASSWORD", "").strip()
+TRANSCRIPT_LIST_TIMEOUT = int(os.getenv("TRANSCRIPT_LIST_TIMEOUT", "45"))
+TRANSCRIPT_FETCH_TIMEOUT = int(os.getenv("TRANSCRIPT_FETCH_TIMEOUT", "90"))
 
 
 def extract_video_id(value: str):
@@ -34,109 +36,152 @@ def extract_video_id(value: str):
 
 def make_api():
     print("[TRANSCRIPT] Creating YouTubeTranscriptApi client...", flush=True)
-    return YouTubeTranscriptApi(
-        proxy_config=WebshareProxyConfig(
-            proxy_username=WEBSHARE_USERNAME,
-            proxy_password=WEBSHARE_PASSWORD,
+    if WEBSHARE_USERNAME and WEBSHARE_PASSWORD:
+        print("[TRANSCRIPT] Webshare credentials: configured", flush=True)
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(
+                proxy_username=WEBSHARE_USERNAME,
+                proxy_password=WEBSHARE_PASSWORD,
+            )
         )
-    )
+    print("[TRANSCRIPT] Webshare credentials: NOT configured; using direct connection", flush=True)
+    return YouTubeTranscriptApi()
+
+
+def _call_with_timeout(fn, timeout):
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout)
+        except FutureTimeoutError:
+            future.cancel()
+            raise TimeoutError(f"operation timed out after {timeout}s")
 
 
 def get_transcript(url: str):
     started = time.time()
     logs = []
 
-    def log(message):
+    def line(message):
         elapsed = time.time() - started
-        line = f"[{elapsed:6.2f}s] {message}"
-        logs.append(line)
-        print(f"[TRANSCRIPT] {line}", flush=True)
+        text = f"[{elapsed:6.2f}s] {message}"
+        logs.append(text)
+        print(f"[TRANSCRIPT] {text}", flush=True)
         return "\n".join(logs)
+
+    def state(status, transcript=""):
+        return status, transcript, "\n".join(logs)
 
     video_id = extract_video_id(url)
     if not video_id:
-        log("❌ YouTube URL/Video ID không hợp lệ")
-        return "❌ Link YouTube không hợp lệ.", "", "\n".join(logs)
+        line("❌ YouTube URL/Video ID không hợp lệ")
+        yield state("❌ Link YouTube không hợp lệ.")
+        return
 
-    log(f"▶ Bắt đầu tải transcript — video_id={video_id}")
-    log("🔧 Khởi tạo YouTubeTranscriptApi + Webshare proxy")
+    line(f"▶ Bắt đầu tải transcript — video_id={video_id}")
+    yield state("⏳ Đang chuẩn bị tải transcript...")
+
+    line("🔧 Khởi tạo YouTubeTranscriptApi + Webshare proxy")
+    yield state("⏳ Đã khởi tạo client; chuẩn bị gọi YouTube API...")
 
     try:
         api = make_api()
+        line(f"🔐 Proxy: {'Webshare' if WEBSHARE_USERNAME and WEBSHARE_PASSWORD else 'direct'}")
+        line(f"🌐 Gọi YouTube API: list(video_id)... (timeout {TRANSCRIPT_LIST_TIMEOUT}s)")
+        yield state("🌐 Đang gọi YouTube API list() — nếu quá thời gian sẽ báo timeout...")
 
-        log("🌐 Gọi YouTube API: list(video_id)...")
-        transcript_list = api.list(video_id)
-        log("✅ Nhận danh sách transcript từ YouTube")
+        transcript_list = _call_with_timeout(lambda: api.list(video_id), TRANSCRIPT_LIST_TIMEOUT)
+        line("✅ Nhận danh sách transcript từ YouTube")
+        yield state("🔎 Đã nhận danh sách transcript; đang phân tích ngôn ngữ...")
 
         selected = None
         available = []
         for t in transcript_list:
-            available.append(f"{t.language_code}{' (translated)' if getattr(t, 'is_translatable', False) else ''}")
+            available.append(
+                f"{t.language_code}{' (translated)' if getattr(t, 'is_translatable', False) else ''}"
+            )
 
         if available:
-            log("📋 Transcript khả dụng: " + ", ".join(available))
+            line("📋 Transcript khả dụng: " + ", ".join(available))
         else:
-            log("⚠️ YouTube trả về danh sách transcript rỗng")
+            line("⚠️ YouTube trả về danh sách transcript rỗng")
+        yield state("🔎 Đang chọn English transcript...")
 
-        # Prefer an English transcript.
-        log("🔎 Tìm English transcript trực tiếp...")
+        line("🔎 Tìm English transcript trực tiếp...")
         for t in transcript_list:
             if t.language_code in {"en", "en-US", "en-GB"}:
                 selected = t
-                log(f"✅ Đã chọn English transcript: {t.language_code}")
+                line(f"✅ Đã chọn English transcript: {t.language_code}")
                 break
 
-        # Otherwise find a translatable transcript and translate it.
         if selected is None:
-            log("ℹ️ Không có English transcript trực tiếp — tìm transcript có thể dịch...")
+            line("ℹ️ Không có English transcript trực tiếp — tìm transcript có thể dịch...")
             for t in transcript_list:
                 try:
                     if t.is_translatable:
-                        log(f"🔄 Đang dịch {t.language_code} → en...")
+                        line(f"🔄 Đang dịch {t.language_code} → en...")
                         selected = t.translate("en")
-                        log("✅ Đã tạo English transcript bằng translation")
+                        line("✅ Đã tạo English transcript bằng translation")
                         break
                 except Exception as exc:
-                    log(f"⚠️ Không dịch được {getattr(t, 'language_code', '?')}: {exc}")
+                    line(f"⚠️ Không dịch được {getattr(t, 'language_code', '?')}: {exc}")
 
         if selected is None:
-            log("❌ Không tìm thấy English transcript khả dụng")
-            return "❌ Video không có English transcript khả dụng.", "", "\n".join(logs)
+            line("❌ Không tìm thấy English transcript khả dụng")
+            yield state("❌ Video không có English transcript khả dụng.")
+            return
 
-        log("📥 Đang fetch các segment transcript...")
-        data = selected.fetch()
-        log(f"✅ Fetch hoàn tất: {len(data)} segment")
+        line(f"📥 Đang fetch các segment transcript... (timeout {TRANSCRIPT_FETCH_TIMEOUT}s)")
+        yield state("📥 Đang tải timestamp + text của từng segment...")
+        data = _call_with_timeout(selected.fetch, TRANSCRIPT_FETCH_TIMEOUT)
+        line(f"✅ Fetch hoàn tất: {len(data)} segment")
+        yield state("🧩 Đang chuẩn hóa transcript và giữ timestamp...")
 
         lines = []
         for index, item in enumerate(data, 1):
             text = re.sub(r"\s+", " ", item.text).strip()
             if text:
-                lines.append(text)
+                start = float(getattr(item, "start", 0.0))
+                duration = float(getattr(item, "duration", 0.0))
+                lines.append({"index": index, "start": start, "duration": duration, "text": text})
             if index == 1 or index % 50 == 0 or index == len(data):
-                log(f"📝 Xử lý segment {index}/{len(data)}")
+                line(f"📝 Xử lý segment {index}/{len(data)}")
+                yield state(f"📝 Đang xử lý segment {index}/{len(data)}...")
 
-        transcript = " ".join(lines)
-        if not transcript:
-            log("❌ Transcript rỗng sau khi xử lý")
-            return "❌ Transcript rỗng.", "", "\n".join(logs)
+        if not lines:
+            line("❌ Transcript rỗng sau khi xử lý")
+            yield state("❌ Transcript rỗng.")
+            return
 
-        log(f"🎉 Hoàn tất: {len(lines)} câu/segment, {len(transcript):,} ký tự")
-        log(f"⏱ Tổng thời gian: {time.time() - started:.2f}s")
-        return "✅ Đã lấy English transcript qua YouTubeTranscript API + Webshare", transcript, "\n".join(logs)
+        # Keep timestamped JSON in a hidden machine-readable field for the next player-sync step.
+        import json
+        timestamped = json.dumps(lines, ensure_ascii=False)
+        transcript = "\n".join(
+            f"[{item['start']:.2f}s] {item['text']}" for item in lines
+        )
+
+        line(f"🎉 Hoàn tất: {len(lines)} câu/segment, {len(transcript):,} ký tự")
+        line(f"⏱ Tổng thời gian: {time.time() - started:.2f}s")
+        yield state(
+            "✅ Transcript đã tải xong — timestamp đã được giữ lại để đồng bộ YouTube player.",
+            transcript,
+        )
+        # The timestamp payload is emitted through the 4th output when available.
+        yield ("__TIMESTAMP_PAYLOAD__", transcript, "\n".join(logs), timestamped)
 
     except Exception as exc:
         msg = str(exc)
-        log(f"❌ LỖI: {type(exc).__name__}: {msg}")
+        line(f"❌ LỖI: {type(exc).__name__}: {msg}")
         print("[TRANSCRIPT] Full traceback:", flush=True)
         traceback.print_exc()
         if "RequestBlocked" in msg or "IpBlocked" in msg or "blocked" in msg.lower():
-            msg = "YouTube vẫn chặn proxy/IP Webshare. Hãy thử proxy residential/ISP hoặc proxy khác.\n\n" + msg
-        return f"❌ Không lấy được transcript cho {video_id}.\n\n{msg}", "", "\n".join(logs)
+            msg = "YouTube vẫn chặn proxy/IP Webshare. Kiểm tra Webshare proxy hoặc thử IP/proxy khác.\n\n" + msg
+        yield state(f"❌ Không lấy được transcript cho {video_id}.\n\n{msg}")
 
 
 with gr.Blocks(title="English Lab — YouTube Transcript") as demo:
     gr.Markdown("# 🎧 English Lab — YouTube Transcript")
-    gr.Markdown("**youtube-transcript-api + Webshare Proxy** — không dùng Tactiq, Playwright, yt-dlp hoặc Invidious.")
+    gr.Markdown("**youtube-transcript-api + Webshare Proxy** — log tiến trình trực tiếp, giữ timestamp để đồng bộ player.")
 
     with gr.Row():
         url = gr.Textbox(
@@ -147,17 +192,26 @@ with gr.Blocks(title="English Lab — YouTube Transcript") as demo:
         button = gr.Button("🚀 Lấy English Transcript", variant="primary", scale=2)
 
     status = gr.Markdown("Sẵn sàng.")
-    output = gr.Textbox(label="English Transcript", lines=24, show_copy_button=True)
+    output = gr.Textbox(label="English Transcript + timestamp", lines=24, show_copy_button=True)
     progress_log = gr.Textbox(
-        label="🔎 Log tiến trình tải transcript",
+        label="🔎 Log tiến trình tải transcript (live)",
         lines=14,
         max_lines=30,
         show_copy_button=True,
         interactive=False,
     )
+    timestamp_payload = gr.Textbox(label="Timestamp data (machine-readable)", visible=False)
 
-    button.click(get_transcript, inputs=url, outputs=[status, output, progress_log])
-    url.submit(get_transcript, inputs=url, outputs=[status, output, progress_log])
+    button.click(
+        get_transcript,
+        inputs=url,
+        outputs=[status, output, progress_log, timestamp_payload],
+    )
+    url.submit(
+        get_transcript,
+        inputs=url,
+        outputs=[status, output, progress_log, timestamp_payload],
+    )
 
 
 if __name__ == "__main__":
