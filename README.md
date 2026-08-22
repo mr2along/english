@@ -3,10 +3,8 @@ title: English Learning Lab
 emoji: 🎧
 colorFrom: blue
 colorTo: purple
-sdk: gradio
-sdk_version: "5.44.1"
-python_version: "3.10"
-app_file: app.py
+sdk: docker
+app_port: 7860
 pinned: false
 ---
 
@@ -27,11 +25,16 @@ A professional YouTube-based English listening, shadowing, pronunciation, gramma
 - Responsive mobile-first UI
 - Tactiq + Playwright Async transcript extraction
 
-## Run
+## Runtime
+
+The Space uses a Docker runtime because Playwright requires a real Chromium browser binary. The Docker image installs Chromium during build and exposes Gradio on port 7860.
+
+No yt-dlp, youtube-transcript-api, pytube, or Invidious is used for transcript extraction.
+
+## Local run
 
 ```bash
 pip install -r requirements.txt
+playwright install chromium
 python app.py
 ```
-
-The app uses Playwright Async to access the Tactiq YouTube transcript page. No yt-dlp is required.
