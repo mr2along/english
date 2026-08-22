@@ -1,43 +1,34 @@
-import asyncio
+import os
 import re
 import subprocess
 import sys
 from urllib.parse import quote, urlparse, parse_qs
 
-# Hugging Face Spaces installs Python packages from requirements.txt, but does not
-# automatically download Playwright's browser binaries. Install Chromium once at
-# startup before the first browser.launch().
+import gradio as gr
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+
+TACTIQ_URL = "https://tactiq.io/tools/youtube_transcript?yt="
+
+
 def ensure_playwright_browser():
+    """Install Chromium only when its executable is actually missing."""
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            try:
-                p.chromium.executable_path
-                # executable_path can be returned even when the file is absent;
-                # explicitly test it below.
-                import os
-                if os.path.exists(p.chromium.executable_path):
-                    return
-            except Exception:
-                pass
+            executable = p.chromium.executable_path
+            if executable and os.path.exists(executable):
+                return
     except Exception:
-        return
+        pass
 
     subprocess.run(
         [sys.executable, "-m", "playwright", "install", "chromium"],
         check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.STDOUT,
         timeout=600,
     )
 
 
 ensure_playwright_browser()
-
-import gradio as gr
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
-
-TACTIQ_URL = "https://tactiq.io/tools/youtube_transcript?yt="
 
 
 def extract_video_id(value: str) -> str | None:
@@ -64,18 +55,22 @@ def extract_video_id(value: str) -> str | None:
 def clean_text(text: str) -> str:
     text = re.sub(r"\r", "", text or "")
     lines, seen = [], set()
+    skip = {"Copy", "Download", "Share", "Get Video Transcript", "Enter YouTube URL"}
     for raw in text.split("\n"):
         line = re.sub(r"\s+", " ", raw).strip()
-        if not line or line in {"Copy", "Download", "Share", "Get Video Transcript", "Enter YouTube URL"}:
+        if not line or line in skip or line in seen:
             continue
-        if line not in seen:
-            lines.append(line)
-            seen.add(line)
+        lines.append(line)
+        seen.add(line)
     return "\n".join(lines)
 
 
 async def _tactiq_transcript(video_url: str) -> str:
     target = TACTIQ_URL + quote(video_url, safe="")
+
+    # IMPORTANT: this coroutine is awaited directly by Gradio. Do not call
+    # asyncio.run() here; doing so creates/closes a second event loop and can
+    # leave Playwright's Connection.run() task pending.
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -98,12 +93,12 @@ async def _tactiq_transcript(video_url: str) -> str:
             await page.goto(target, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(2500)
 
-            for marker in [
+            for marker in (
                 "text=Get Video Transcript",
                 "text=Transcript",
                 "text=Copy",
                 "text=Download",
-            ]:
+            ):
                 try:
                     await page.locator(marker).first.wait_for(timeout=8000, state="visible")
                     break
@@ -111,6 +106,7 @@ async def _tactiq_transcript(video_url: str) -> str:
                     pass
 
             await page.wait_for_timeout(4000)
+            candidates = []
             selectors = [
                 "[data-testid*='transcript']",
                 "[class*='transcript']",
@@ -118,7 +114,6 @@ async def _tactiq_transcript(video_url: str) -> str:
                 "main article",
                 "main",
             ]
-            candidates = []
             for selector in selectors:
                 try:
                     loc = page.locator(selector)
@@ -131,18 +126,18 @@ async def _tactiq_transcript(video_url: str) -> str:
 
             candidates.append(clean_text(await page.locator("body").inner_text(timeout=10000)))
 
-            def score(s: str) -> tuple[int, int]:
-                lines = s.splitlines()
+            def score(text: str) -> tuple[int, int]:
+                lines = text.splitlines()
                 sentence_lines = sum(
                     1 for x in lines if len(x) > 20 and re.search(r"[.!?]$", x)
                 )
-                return sentence_lines, min(len(s), 20000)
+                return sentence_lines, min(len(text), 20000)
 
             best = max(candidates, key=score, default="")
-            for marker in [
+            for marker in (
                 "How to get the transcript of a YouTube video",
                 "Frequently Asked Questions",
-            ]:
+            ):
                 if marker in best and best.count(marker) == 1:
                     best = best.split(marker, 1)[0].strip()
 
@@ -153,18 +148,30 @@ async def _tactiq_transcript(video_url: str) -> str:
                 )
             return best
         finally:
-            await context.close()
-            await browser.close()
+            # Explicitly close page/context/browser before leaving the async
+            # Playwright context, avoiding TargetClosedError/pending tasks.
+            try:
+                await page.close()
+            except Exception:
+                pass
+            try:
+                await context.close()
+            except Exception:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
 
-def get_transcript(video_url: str) -> str:
+async def get_transcript(video_url: str) -> str:
     if not (video_url or "").strip():
         return "⚠️ Hãy nhập link YouTube."
     video_id = extract_video_id(video_url)
     if not video_id:
         return "❌ Link YouTube không hợp lệ."
     try:
-        return asyncio.run(_tactiq_transcript(video_url))
+        return await _tactiq_transcript(video_url)
     except PlaywrightTimeoutError as exc:
         return f"❌ Tactiq/Playwright timeout khi lấy video {video_id}.\n\nChi tiết: {exc}"
     except Exception as exc:
@@ -201,8 +208,10 @@ with gr.Blocks(title="English Lab — Tactiq Transcript", css=CSS) as demo:
         placeholder="Transcript sẽ xuất hiện ở đây...",
     )
 
-    def run(url_value):
-        result = get_transcript(url_value)
+    # Gradio natively awaits async callbacks. Keeping this callback async avoids
+    # asyncio.run() inside an already-running event loop.
+    async def run(url_value):
+        result = await get_transcript(url_value)
         if result.startswith(("❌", "⚠️")):
             return "❌ Lỗi", result
         return "✅ Đã lấy transcript", result
@@ -212,4 +221,6 @@ with gr.Blocks(title="English Lab — Tactiq Transcript", css=CSS) as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    # SSR currently produces POST 405 errors in this Space. Disable it and use
+    # the stable Gradio server-rendering path.
+    demo.launch(server_name="0.0.0.0", server_port=7860, ssr_mode=False)
