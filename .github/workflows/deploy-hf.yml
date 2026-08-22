@@ -1,0 +1,36 @@
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches:
+      - feature/english-lab-v21
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install Hugging Face CLI
+        run: |
+          curl -LsSf https://hf.co/cli/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy with Hugging Face Trusted Publisher
+        env:
+          HF_OIDC_RESOURCE: spaces/Mrlongpro/autosubs
+        run: |
+          hf upload Mrlongpro/autosubs . \
+            --repo-type space \
+            --exclude=".git*" \
+            --exclude=".github*" \
+            --delete="*" \
+            --commit-message="Deploy from GitHub ${GITHUB_SHA::7}"
