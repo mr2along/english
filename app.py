@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from urllib.parse import parse_qs, urlparse
 
 import gradio as gr
+import requests
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import WebshareProxyConfig
 
@@ -14,6 +15,7 @@ WEBSHARE_USERNAME = os.getenv("WEBSHARE_USERNAME", "").strip()
 WEBSHARE_PASSWORD = os.getenv("WEBSHARE_PASSWORD", "").strip()
 TRANSCRIPT_LIST_TIMEOUT = int(os.getenv("TRANSCRIPT_LIST_TIMEOUT", "45"))
 TRANSCRIPT_FETCH_TIMEOUT = int(os.getenv("TRANSCRIPT_FETCH_TIMEOUT", "90"))
+PROXY_TEST_TIMEOUT = int(os.getenv("PROXY_TEST_TIMEOUT", "15"))
 
 
 def extract_video_id(value: str):
@@ -33,6 +35,25 @@ def extract_video_id(value: str):
         if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
             return parts[1] if re.fullmatch(r"[A-Za-z0-9_-]{11}", parts[1]) else None
     return None
+
+
+def make_proxy_url():
+    if not (WEBSHARE_USERNAME and WEBSHARE_PASSWORD):
+        return None
+    return f"http://{WEBSHARE_USERNAME}:{WEBSHARE_PASSWORD}@p.webshare.io:80/"
+
+
+def test_proxy():
+    proxy_url = make_proxy_url()
+    if not proxy_url:
+        return False, "credentials not configured"
+    proxies = {"http": proxy_url, "https": proxy_url}
+    try:
+        response = requests.get("https://ipv4.webshare.io/", proxies=proxies, timeout=PROXY_TEST_TIMEOUT)
+        response.raise_for_status()
+        return True, response.text.strip()[:200]
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 def make_api():
@@ -85,12 +106,24 @@ def get_transcript(url: str):
     yield state("⏳ Đang chuẩn bị tải transcript...")
 
     line("🔧 Khởi tạo YouTubeTranscriptApi + Webshare proxy")
-    yield state("⏳ Đã khởi tạo client; chuẩn bị gọi YouTube API...")
+    yield state("⏳ Đã khởi tạo client; chuẩn bị kiểm tra proxy...")
 
     try:
         api = make_api()
-        proxy_mode = "Webshare" if WEBSHARE_USERNAME and WEBSHARE_PASSWORD else "direct"
-        line(f"🔐 Proxy: {proxy_mode}")
+        if WEBSHARE_USERNAME and WEBSHARE_PASSWORD:
+            line("🔐 Proxy: Webshare")
+            line(f"🌐 Kiểm tra Webshare connectivity... (timeout {PROXY_TEST_TIMEOUT}s)")
+            yield state("🌐 Đang kiểm tra kết nối Webshare...")
+            ok, detail = test_proxy()
+            if not ok:
+                line(f"❌ Webshare connectivity failed: {detail}")
+                yield state("❌ Webshare proxy không kết nối được. Xem log để kiểm tra credential/network.")
+                return
+            line(f"✅ Webshare connectivity OK: {detail}")
+        else:
+            line("🔐 Proxy: direct — Webshare credentials chưa được nạp vào runtime")
+            yield state("⚠️ Chưa thấy Webshare credentials trong runtime; đang dùng direct connection...")
+
         line(f"🌐 Gọi YouTube API: list(video_id)... (timeout {TRANSCRIPT_LIST_TIMEOUT}s)")
         yield state("🌐 Đang gọi YouTube API list() — nếu quá thời gian sẽ báo timeout...")
 
@@ -183,7 +216,7 @@ def get_transcript(url: str):
 
 with gr.Blocks(title="English Lab — YouTube Transcript") as demo:
     gr.Markdown("# 🎧 English Lab — YouTube Transcript")
-    gr.Markdown("**youtube-transcript-api + Webshare Proxy** — log tiến trình trực tiếp, giữ timestamp để đồng bộ player.")
+    gr.Markdown("**youtube-transcript-api + Webshare Proxy** — kiểm tra proxy trước, log tiến trình trực tiếp, giữ timestamp để đồng bộ player.")
 
     with gr.Row():
         url = gr.Textbox(
