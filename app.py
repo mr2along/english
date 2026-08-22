@@ -5,9 +5,11 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 import gradio as gr
+import requests
 
 APP_TITLE = "English Lab"
 DEFAULT_URL = "https://www.youtube.com/watch?v=vxtvWovNKKE"
+TRANSCRIPT_BACKEND_URL = os.getenv("TRANSCRIPT_BACKEND_URL", "http://127.0.0.1:8765")
 
 
 def get_video_id(value: str):
@@ -68,7 +70,6 @@ def parse_transcript(text):
             out[i]["duration"] = max(0, out[i + 1]["start"] - out[i]["start"])
     if out:
         return out
-    # JSON3
     try:
         data = json.loads(text)
         events = data.get("events", []) if isinstance(data, dict) else []
@@ -82,15 +83,19 @@ def parse_transcript(text):
     return out
 
 
-def player_html(vid):
+def player_html(vid, segments=None):
     v = html.escape(vid, quote=True)
-    # Keep this deliberately simple: a normal YouTube iframe, exactly as documented by YouTube.
     src = f"https://www.youtube.com/embed/{v}?enablejsapi=1&playsinline=1&rel=0"
-    return f'''<div class="yt-wrap">
+    rows = []
+    for i, x in enumerate(segments or []):
+        start = float(x.get("start", 0))
+        rows.append(f'<button class="el-line" data-start="{start:.3f}" onclick="window.englishLabSeek({start:.3f})"><span>{i+1}. {int(start//60):02d}:{int(start%60):02d}</span> {html.escape(x.get("text", ""))}</button>')
+    transcript = '<div class="el-lines">' + ''.join(rows) + '</div>' if rows else ''
+    return f'''<div class="yt-wrap" data-video-id="{v}">
 <div class="yt-status">YouTube video: <b>{v}</b></div>
 <div class="yt-frame"><iframe id="englishlab-youtube" src="{src}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe></div>
-<div class="yt-links"><a href="https://www.youtube.com/watch?v={v}" target="_blank" rel="noopener">↗ Mở video trực tiếp trên YouTube</a> · <a href="https://www.youtube.com/embed/{v}" target="_blank" rel="noopener">Mở URL embed để kiểm tra</a></div>
-</div>'''
+<div class="yt-links"><a href="https://www.youtube.com/watch?v={v}" target="_blank" rel="noopener">↗ Mở video trực tiếp trên YouTube</a> · <a href="https://www.youtube.com/embed/{v}" target="_blank" rel="noopener">Mở URL embed</a></div>
+{transcript}</div>'''
 
 
 def load_video(url):
@@ -100,8 +105,22 @@ def load_video(url):
     return f"✅ Đã tạo player cho Video ID: `{vid}`", player_html(vid)
 
 
-def load_sample():
-    return load_video(DEFAULT_URL)
+def load_transcript_from_backend(url, lang):
+    vid = get_video_id(url)
+    if not vid:
+        return "❌ URL/Video ID YouTube không hợp lệ.", "", "[]"
+    try:
+        r = requests.get(f"{TRANSCRIPT_BACKEND_URL.rstrip('/')}/transcript", params={"video": vid, "lang": lang or "en"}, timeout=45)
+        r.raise_for_status()
+        data = r.json()
+        segments = data.get("segments") or []
+        if not segments:
+            return f"⚠️ Backend không tìm thấy transcript cho `{vid}`.", player_html(vid), "[]"
+        return f"✅ Đã lấy transcript `{lang}` cho `{vid}` · {len(segments)} câu", player_html(vid, segments), json.dumps(segments, ensure_ascii=False, indent=2)
+    except requests.RequestException as e:
+        return f"❌ Không kết nối được transcript backend `{TRANSCRIPT_BACKEND_URL}`: {e}", player_html(vid), "[]"
+    except Exception as e:
+        return f"❌ Backend transcript trả dữ liệu không hợp lệ: {e}", player_html(vid), "[]"
 
 
 def import_transcript(url, text, file):
@@ -114,12 +133,7 @@ def import_transcript(url, text, file):
     segments = parse_transcript(text or "")
     if not segments:
         return f"⚠️ Video `{vid}` đã sẵn sàng nhưng transcript chưa có timestamp hoặc không đọc được.", player_html(vid), "[]"
-    rows = []
-    for i, x in enumerate(segments):
-        rows.append(f'<button class="el-line" data-start="{x["start"]:.3f}" onclick="window.englishLabSeek({x["start"]:.3f})"><span>{i+1}. {int(x["start"]//60):02d}:{int(x["start"]%60):02d}</span> {html.escape(x["text"])}</button>')
-    transcript = '<div class="el-lines">' + ''.join(rows) + '</div>'
-    p = player_html(vid).replace('</div>\n</div>', '</div>\n' + transcript + '</div>')
-    return f"✅ Video `{vid}` · {len(segments)} câu", p, json.dumps(segments, ensure_ascii=False, indent=2)
+    return f"✅ Video `{vid}` · {len(segments)} câu", player_html(vid, segments), json.dumps(segments, ensure_ascii=False, indent=2)
 
 
 CSS = r'''
@@ -145,20 +159,24 @@ JS = r'''() => {
 }'''
 
 with gr.Blocks(title=APP_TITLE, css=CSS, js=JS, theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🎧 English Lab\nLuyện nghe · đọc · phát âm với video YouTube và transcript nhập thủ công")
+    gr.Markdown("# 🎧 English Lab\nLuyện nghe · đọc · phát âm với video YouTube và transcript")
     with gr.Row():
         url = gr.Textbox(label="YouTube URL hoặc Video ID", value=DEFAULT_URL, scale=5)
         embed = gr.Button("🎬 Nhúng video", variant="primary", scale=1)
+    with gr.Row():
+        lang = gr.Dropdown(["en", "vi", "ja", "ko", "zh", "auto"], value="en", label="Ngôn ngữ transcript", scale=1)
+        get_transcript = gr.Button("🚀 Lấy transcript từ backend", variant="primary", scale=2)
     status = gr.Markdown("Sẵn sàng — video mẫu đã được điền sẵn.")
     player = gr.HTML(value=player_html("vxtvWovNKKE"), label="Video lesson")
     with gr.Row():
         with gr.Column():
             file = gr.File(label="📄 Transcript TXT / SRT / VTT / JSON", file_types=[".txt", ".srt", ".vtt", ".json"], type="filepath")
             text = gr.Textbox(label="📝 Dán transcript", lines=8, placeholder="[00:12] Hello...")
-            imp = gr.Button("🚀 Import transcript", variant="secondary")
+            imp = gr.Button("🚀 Import transcript thủ công", variant="secondary")
         with gr.Column():
             parsed = gr.Code(label="🔬 Parsed segments", language="json", lines=12)
     embed.click(load_video, url, [status, player])
+    get_transcript.click(load_transcript_from_backend, [url, lang], [status, player, parsed])
     imp.click(import_transcript, [url, text, file], [status, player, parsed])
 
 if __name__ == "__main__":
