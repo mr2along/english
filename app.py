@@ -1,9 +1,10 @@
+import json
 import os
 import re
 import time
 import traceback
-from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from urllib.parse import parse_qs, urlparse
 
 import gradio as gr
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -49,28 +50,30 @@ def make_api():
 
 
 def _call_with_timeout(fn, timeout):
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn)
-        try:
-            return future.result(timeout=timeout)
-        except FutureTimeoutError:
-            future.cancel()
-            raise TimeoutError(f"operation timed out after {timeout}s")
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn)
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        future.cancel()
+        raise TimeoutError(f"operation timed out after {timeout}s")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def get_transcript(url: str):
     started = time.time()
     logs = []
+    timestamp_payload = ""
 
     def line(message):
         elapsed = time.time() - started
         text = f"[{elapsed:6.2f}s] {message}"
         logs.append(text)
         print(f"[TRANSCRIPT] {text}", flush=True)
-        return "\n".join(logs)
 
     def state(status, transcript=""):
-        return status, transcript, "\n".join(logs)
+        return status, transcript, "\n".join(logs), timestamp_payload
 
     video_id = extract_video_id(url)
     if not video_id:
@@ -86,7 +89,8 @@ def get_transcript(url: str):
 
     try:
         api = make_api()
-        line(f"🔐 Proxy: {'Webshare' if WEBSHARE_USERNAME and WEBSHARE_PASSWORD else 'direct'}")
+        proxy_mode = "Webshare" if WEBSHARE_USERNAME and WEBSHARE_PASSWORD else "direct"
+        line(f"🔐 Proxy: {proxy_mode}")
         line(f"🌐 Gọi YouTube API: list(video_id)... (timeout {TRANSCRIPT_LIST_TIMEOUT}s)")
         yield state("🌐 Đang gọi YouTube API list() — nếu quá thời gian sẽ báo timeout...")
 
@@ -100,7 +104,6 @@ def get_transcript(url: str):
             available.append(
                 f"{t.language_code}{' (translated)' if getattr(t, 'is_translatable', False) else ''}"
             )
-
         if available:
             line("📋 Transcript khả dụng: " + ", ".join(available))
         else:
@@ -141,9 +144,14 @@ def get_transcript(url: str):
         for index, item in enumerate(data, 1):
             text = re.sub(r"\s+", " ", item.text).strip()
             if text:
-                start = float(getattr(item, "start", 0.0))
-                duration = float(getattr(item, "duration", 0.0))
-                lines.append({"index": index, "start": start, "duration": duration, "text": text})
+                lines.append(
+                    {
+                        "index": index,
+                        "start": float(getattr(item, "start", 0.0)),
+                        "duration": float(getattr(item, "duration", 0.0)),
+                        "text": text,
+                    }
+                )
             if index == 1 or index % 50 == 0 or index == len(data):
                 line(f"📝 Xử lý segment {index}/{len(data)}")
                 yield state(f"📝 Đang xử lý segment {index}/{len(data)}...")
@@ -153,12 +161,8 @@ def get_transcript(url: str):
             yield state("❌ Transcript rỗng.")
             return
 
-        # Keep timestamped JSON in a hidden machine-readable field for the next player-sync step.
-        import json
-        timestamped = json.dumps(lines, ensure_ascii=False)
-        transcript = "\n".join(
-            f"[{item['start']:.2f}s] {item['text']}" for item in lines
-        )
+        timestamp_payload = json.dumps(lines, ensure_ascii=False)
+        transcript = "\n".join(f"[{item['start']:.2f}s] {item['text']}" for item in lines)
 
         line(f"🎉 Hoàn tất: {len(lines)} câu/segment, {len(transcript):,} ký tự")
         line(f"⏱ Tổng thời gian: {time.time() - started:.2f}s")
@@ -166,8 +170,6 @@ def get_transcript(url: str):
             "✅ Transcript đã tải xong — timestamp đã được giữ lại để đồng bộ YouTube player.",
             transcript,
         )
-        # The timestamp payload is emitted through the 4th output when available.
-        yield ("__TIMESTAMP_PAYLOAD__", transcript, "\n".join(logs), timestamped)
 
     except Exception as exc:
         msg = str(exc)
@@ -202,16 +204,8 @@ with gr.Blocks(title="English Lab — YouTube Transcript") as demo:
     )
     timestamp_payload = gr.Textbox(label="Timestamp data (machine-readable)", visible=False)
 
-    button.click(
-        get_transcript,
-        inputs=url,
-        outputs=[status, output, progress_log, timestamp_payload],
-    )
-    url.submit(
-        get_transcript,
-        inputs=url,
-        outputs=[status, output, progress_log, timestamp_payload],
-    )
+    button.click(get_transcript, inputs=url, outputs=[status, output, progress_log, timestamp_payload])
+    url.submit(get_transcript, inputs=url, outputs=[status, output, progress_log, timestamp_payload])
 
 
 if __name__ == "__main__":
