@@ -13,8 +13,24 @@ DEFAULT_PLAYLIST = "https://youtube.com/playlist?list=PLRDC-DZ_uWhpbeuja5CFDhkVV
 
 
 def video_id(value: str) -> str | None:
-    m = re.search(r"(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})", value or "")
-    return m.group(1) if m else (value.strip() if re.fullmatch(r"[A-Za-z0-9_-]{11}", (value or "").strip()) else None)
+    value = (value or "").strip()
+    m = re.search(r"(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})", value)
+    if m:
+        return m.group(1)
+    return value if re.fullmatch(r"[A-Za-z0-9_-]{11}", value) else None
+
+
+def youtube_embed(vid: str | None) -> str:
+    if not vid:
+        return "<div class='yt-empty'>🎬 Chọn video để bắt đầu.</div>"
+    safe = html.escape(vid, quote=True)
+    return (
+        "<div class='yt-wrap'><iframe "
+        f"src='https://www.youtube.com/embed/{safe}?enablejsapi=1&rel=0' "
+        "title='YouTube video' frameborder='0' allow='accelerometer; autoplay; "
+        "clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share' "
+        "allowfullscreen></iframe></div>"
+    )
 
 
 def normalize_caption_text(s: str) -> str:
@@ -37,7 +53,7 @@ def split_sentences(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     start = end = None
     for item in items:
         text = normalize_caption_text(str(item.get("text", "")))
-        if not text:
+        if not text or text.lower() in {"[music]", "♪"}:
             continue
         if start is None:
             start = float(item.get("start", 0))
@@ -51,146 +67,116 @@ def split_sentences(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _yt_dlp_caption_fallback(vid: str):
-    """Fallback for HF/cloud IPs where youtube-transcript-api is blocked.
+def _fetch_ytt(vid: str):
+    from youtube_transcript_api import YouTubeTranscriptApi
 
-    yt-dlp is used only for the subtitle track, not for audio/video download.
-    Android clients are tried first because YouTube can expose caption metadata
-    differently to different clients.
-    """
+    api = YouTubeTranscriptApi()
+    errors = []
+    try:
+        tracks = list(api.list(vid))
+        generated = [t for t in tracks if getattr(t, "is_generated", False) and str(getattr(t, "language_code", "")).lower().startswith("en")]
+        manual = [t for t in tracks if not getattr(t, "is_generated", False) and str(getattr(t, "language_code", "")).lower().startswith("en")]
+        for track in generated + manual:
+            try:
+                rows = _ytt_rows(track.fetch())
+                sentences = split_sentences(rows)
+                if sentences:
+                    kind = "auto-generated" if getattr(track, "is_generated", False) else "manual"
+                    return sentences, f"YouTube English ({kind})"
+            except Exception as exc:
+                errors.append(f"{getattr(track, 'language_code', '?')}: {type(exc).__name__}: {exc}")
+    except Exception as exc:
+        errors.append(f"list: {type(exc).__name__}: {exc}")
+
+    for langs in (["en"], ["en-US"], ["en-GB"]):
+        try:
+            sentences = split_sentences(_ytt_rows(api.fetch(vid, languages=langs)))
+            if sentences:
+                return sentences, "YouTube English captions"
+        except Exception as exc:
+            errors.append(f"fetch {langs[0]}: {type(exc).__name__}: {exc}")
+    return None, errors
+
+
+def _yt_dlp_caption_fallback(vid: str):
     workdir = tempfile.mkdtemp(prefix="ytcaps-")
     url = f"https://www.youtube.com/watch?v={vid}"
     errors = []
     clients = ["android", "web_safari", "web"]
-
     for client in clients:
-        outtmpl = os.path.join(workdir, "caption.%(ext)s")
         cmd = [
-            "yt-dlp", url,
-            "--skip-download",
-            "--write-auto-subs",
-            "--write-subs",
-            "--sub-langs", "en,en-US,en-GB",
-            "--sub-format", "vtt",
-            "--output", outtmpl,
-            "--no-playlist",
-            "--force-ipv4",
-            "--socket-timeout", "20",
-            "--retries", "2",
-            "--extractor-args", f"youtube:player_client={client}",
-            "--no-warnings",
+            "yt-dlp", url, "--skip-download", "--write-auto-subs", "--write-subs",
+            "--sub-langs", "en,en-US,en-GB", "--sub-format", "vtt",
+            "--output", os.path.join(workdir, "caption.%(ext)s"), "--no-playlist",
+            "--force-ipv4", "--socket-timeout", "20", "--retries", "2",
+            "--extractor-args", f"youtube:player_client={client}", "--no-warnings",
         ]
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
             files = [os.path.join(workdir, x) for x in os.listdir(workdir) if x.endswith(".vtt")]
             if p.returncode == 0 and files:
-                # Prefer English auto-generated track when yt-dlp produced more than one.
                 chosen = next((f for f in files if ".en." in f or ".en-US." in f or ".en-GB." in f), files[0])
-                rows = []
                 block_re = re.compile(
                     r"(?m)^(\d{2}:\d{2}:\d{2}[\.,]\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}[\.,]\d{3}).*?\n(.*?)(?=\n\n|\Z)",
                     re.S,
                 )
-
                 def ts(v):
-                    v = v.replace(",", ".")
-                    h, m, s = v.split(":")
+                    h, m, s = v.replace(",", ".").split(":")
                     return int(h) * 3600 + int(m) * 60 + float(s)
-
                 raw = open(chosen, "r", encoding="utf-8", errors="ignore").read()
+                rows = []
                 for m in block_re.finditer(raw):
-                    text = re.sub(r"<[^>]+>", " ", m.group(3))
-                    text = normalize_caption_text(text)
+                    text = normalize_caption_text(m.group(3))
                     if text and text.lower() not in {"♪", "[music]"}:
-                        rows.append({"text": text, "start": ts(m.group(1)), "duration": max(0.1, ts(m.group(2)) - ts(m.group(1)))})
+                        a, b = ts(m.group(1)), ts(m.group(2))
+                        rows.append({"text": text, "start": a, "duration": max(0.1, b - a)})
                 sentences = split_sentences(rows)
                 if sentences:
                     return sentences, f"yt-dlp YouTube English ({client})"
-            errors.append(f"yt-dlp {client}: {(p.stderr or p.stdout)[-900:]}")
+            errors.append(f"{client}: {(p.stderr or p.stdout)[-700:]}")
         except Exception as exc:
-            errors.append(f"yt-dlp {client}: {type(exc).__name__}: {exc}")
-    raise RuntimeError("; ".join(errors)[-3500:])
+            errors.append(f"{client}: {type(exc).__name__}: {exc}")
+    raise RuntimeError("; ".join(errors)[-3000:])
 
 
 def fetch_youtube_captions(url: str):
-    """Fetch English captions, preferring YouTube English auto-generated tracks."""
     vid = video_id(url)
     if not vid:
         raise ValueError("Không nhận diện được YouTube video ID.")
-
-    from youtube_transcript_api import YouTubeTranscriptApi
-
-    api = YouTubeTranscriptApi()
-    errors = []
-
-    # Primary path: youtube-transcript-api. It supports generated captions.
-    try:
-        tracks = list(api.list(vid))
-        generated_en = [t for t in tracks if getattr(t, "is_generated", False) and str(getattr(t, "language_code", "")).startswith("en")]
-        manual_en = [t for t in tracks if not getattr(t, "is_generated", False) and str(getattr(t, "language_code", "")).startswith("en")]
-        for t in generated_en + manual_en:
-            try:
-                sentences = split_sentences(_ytt_rows(t.fetch()))
-                if sentences:
-                    kind = "auto-generated" if getattr(t, "is_generated", False) else "manual"
-                    return sentences, f"YouTube English ({kind})"
-            except Exception as exc:
-                errors.append(f"track {getattr(t, 'language_code', '?')}: {type(exc).__name__}: {exc}")
-    except Exception as exc:
-        errors.append(f"youtube-transcript-api list: {type(exc).__name__}: {exc}")
-
-    # Some environments block transcript listing but allow direct fetch.
-    for languages in (["en"], ["en-US"], ["en-GB"]):
-        try:
-            sentences = split_sentences(_ytt_rows(api.fetch(vid, languages=languages)))
-            if sentences:
-                return sentences, "YouTube English captions"
-        except Exception as exc:
-            errors.append(f"fetch {languages[0]}: {type(exc).__name__}: {exc}")
-
-    # HF/cloud fallback: try yt-dlp subtitle extraction with alternate clients.
+    sentences, errors = _fetch_ytt(vid)
+    if sentences:
+        return sentences, errors
     try:
         return _yt_dlp_caption_fallback(vid)
     except Exception as exc:
-        errors.append(f"yt-dlp fallback: {type(exc).__name__}: {exc}")
-
+        errors.append(f"yt-dlp: {type(exc).__name__}: {exc}")
     raise RuntimeError(
-        "YouTube không trả được English captions từ môi trường hiện tại. "
-        "Video có thể có English (auto-generated) trên trình duyệt nhưng IP cloud của Space bị YouTube chặn.\n\n"
-        + "\n".join(errors)[-5000:]
+        "YouTube có thể đang chặn IP cloud của Hugging Face. "
+        "youtube-transcript-api đã thử English/English auto-generated và yt-dlp fallback.\n\n" + "\n".join(errors)[-4000:]
     )
 
 
 def empty_learning():
-    return (
-        "🎬 Chọn video để luyện\n\nChưa có bài học.",
-        {"sentences": [], "index": 0},
-        "",
-        "🔒 Transcript đang ẩn.",
-        "",
-        0,
-        "",
-    )
+    return "🎬 Chọn video để luyện\n\nChưa có bài học.", {"sentences": [], "index": 0, "id": None}, "", "🔒 Transcript đang ẩn.", "", 0, "", youtube_embed(None)
 
 
 def load_video(url: str):
     vid = video_id(url)
     if not vid:
-        e = "❌ Hãy nhập URL video YouTube cụ thể."
-        return e, {"sentences": [], "index": 0}, "", "🔒 Transcript đang ẩn.", "", 0, e
+        return "❌ Hãy nhập URL video YouTube cụ thể.", {"sentences": [], "index": 0, "id": None}, "", "🔒 Transcript đang ẩn.", "", 0, "❌ URL không hợp lệ.", youtube_embed(None)
+    embed = youtube_embed(vid)
     try:
         sentences, source = fetch_youtube_captions(url)
     except Exception as exc:
-        message = f"### 🎬 Video `{vid}`\n\n❌ **Không lấy được English captions.**\n\n{str(exc)[-4500:]}"
-        return message, {"sentences": [], "index": 0, "url": url, "id": vid}, "", "🔒 Transcript đang ẩn.", "", 0, message
+        message = f"### 🎬 Video `{vid}`\n\n⚠️ **Video đã được chọn nhưng chưa lấy được transcript.**\n\n{str(exc)[-4000:]}"
+        return message, {"sentences": [], "index": 0, "url": url, "id": vid}, "", "🔒 Transcript đang ẩn.", "", 0, message, embed
     state = {"sentences": sentences, "index": 0, "url": url, "id": vid}
     first = sentences[0]
     title = f"### 🎬 Video `{vid}`\n\n✅ **{source}** · **{len(sentences)} câu**"
-    return title, state, first["text"], "🔒 Transcript đang ẩn.", "", 0, ""
+    return title, state, first["text"], "🔒 Transcript đang ẩn.", "", 0, "", embed
 
 
 def playlist_videos(url: str):
-    """Playlist metadata only. Transcript extraction is independent of Invidious."""
     cmd = [
         "yt-dlp", "--flat-playlist", "--dump-single-json", "--skip-download", url,
         "--force-ipv4", "--socket-timeout", "20", "--retries", "2",
@@ -198,7 +184,7 @@ def playlist_videos(url: str):
     ]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if p.returncode != 0:
-        raise RuntimeError((p.stderr or p.stdout)[-3500:])
+        raise RuntimeError((p.stderr or p.stdout)[-3000:])
     data = json.loads(p.stdout)
     return [
         {"title": e.get("title") or f"Video {i}", "id": e["id"], "url": f"https://www.youtube.com/watch?v={e['id']}"}
@@ -208,32 +194,29 @@ def playlist_videos(url: str):
 
 def import_source(url: str):
     if video_id(url):
-        title, state, text, hidden, trans, pos, status = load_video(url)
-        return title, state, text, hidden, trans, pos, status, gr.update(choices=[(f"1. {video_id(url)}", url)], value=url)
+        result = load_video(url)
+        return (*result, gr.update(choices=[(f"1. {video_id(url)}", url)], value=url))
     try:
         videos = playlist_videos(url)
     except Exception as exc:
-        title, state, text, hidden, trans, pos, _ = empty_learning()
-        return title, state, text, hidden, trans, pos, f"❌ Playlist import failed: {exc}", gr.update(choices=[], value=None)
+        title, state, text, hidden, trans, pos, _, embed = empty_learning()
+        return title, state, text, hidden, trans, pos, f"❌ Playlist import failed: {exc}", embed, gr.update(choices=[], value=None)
     choices = [(f"{i}. {v['title']}", v["url"]) for i, v in enumerate(videos, 1)]
     if not choices:
-        title, state, text, hidden, trans, pos, _ = empty_learning()
-        return title, state, text, hidden, trans, pos, "❌ Playlist không có video.", gr.update(choices=[], value=None)
+        title, state, text, hidden, trans, pos, _, embed = empty_learning()
+        return title, state, text, hidden, trans, pos, "❌ Playlist không có video.", embed, gr.update(choices=[], value=None)
     first_url = choices[0][1]
-    title, state, text, hidden, trans, pos, status = load_video(first_url)
-    return title, state, text, hidden, trans, pos, f"✅ {len(choices)} video được đưa vào thư viện.", gr.update(choices=choices, value=first_url)
+    result = load_video(first_url)
+    return (*result, f"✅ {len(choices)} video được đưa vào thư viện.", result[-1], gr.update(choices=choices, value=first_url))
 
 
 def select_video(url: str):
-    if not url:
-        title, state, text, hidden, trans, pos, status = empty_learning()
-        return title, state, text, hidden, trans, pos, status
-    return load_video(url)
+    return load_video(url) if url else empty_learning()
 
 
 def choose_sentence(state, index):
     if not state or not state.get("sentences"):
-        return "🎬 Chưa có bài học.", "", "🔒 Transcript đang ẩn.", "", 0
+        return "🎬 Chưa có transcript.", "", "🔒 Transcript đang ẩn.", "", 0
     sents = state["sentences"]
     i = max(0, min(int(index), len(sents) - 1))
     state["index"] = i
@@ -254,18 +237,24 @@ def reveal(text, visible):
 
 
 def translate(text):
-    return "🇻🇳 Chức năng dịch sẽ dùng AI Teacher." if text else "⚠️ Chưa có câu."
+    return "🇻🇳 Dịch: Chức năng dịch AI sẽ được xử lý ở bước AI Teacher." if text else "⚠️ Chưa có câu."
 
 
 def teacher(text):
     if not text:
         return "⚠️ Chưa có câu để phân tích."
-    return f"### 🧑‍🏫 AI Teacher\n**Sentence:** {text}\n\n- Nghe trọng âm và nối âm.\n- Xác định chủ ngữ, động từ và cấu trúc chính.\n- Shadowing 2–3 lần rồi tự đọc lại."
+    return f"### 🧑‍🏫 AI Teacher\n**Sentence:** {text}\n\n- Xác định chủ ngữ, động từ và cấu trúc chính.\n- Chú ý trọng âm, nối âm và ngữ điệu.\n- Shadowing 2–3 lần rồi tự đọc lại."
 
 
-with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft()) as demo:
+CSS = """
+.yt-wrap{position:relative;width:100%;padding-top:56.25%;overflow:hidden;border-radius:14px;background:#000}
+.yt-wrap iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.yt-empty{padding:60px 20px;text-align:center;background:#111;color:#aaa;border-radius:14px}
+"""
+
+with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft(), css=CSS) as demo:
     gr.Markdown("# 🇬🇧 English Learning Lab\nListening · Shadowing · Speaking · Grammar · Vocabulary · Quiz · Progress")
-    state = gr.State({"sentences": [], "index": 0})
+    state = gr.State({"sentences": [], "index": 0, "id": None})
 
     with gr.Tab("📚 Library"):
         url = gr.Textbox(value=DEFAULT_PLAYLIST, label="YouTube video / playlist URL")
@@ -275,6 +264,7 @@ with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft()) as demo:
 
     with gr.Tab("🎯 Learning Session"):
         lesson_title = gr.Markdown("🎬 Chọn video để luyện\n\nChưa có bài học.")
+        video_frame = gr.HTML(youtube_embed(None), label="Video")
         with gr.Row():
             prev_btn = gr.Button("◀ Câu trước")
             next_btn = gr.Button("Câu tiếp ▶")
@@ -293,8 +283,8 @@ with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft()) as demo:
         gr.Markdown("### 5️⃣ Quick Quiz")
         quiz = gr.Markdown("Quiz sẽ xuất hiện sau AI Teacher.")
 
-    import_btn.click(import_source, inputs=url, outputs=[lesson_title, state, sentence, hidden, translation, progress, status, selected])
-    selected.change(select_video, inputs=selected, outputs=[lesson_title, state, sentence, hidden, translation, progress, status])
+    import_btn.click(import_source, inputs=url, outputs=[lesson_title, state, sentence, hidden, translation, progress, status, video_frame, selected])
+    selected.change(select_video, inputs=selected, outputs=[lesson_title, state, sentence, hidden, translation, progress, status, video_frame])
     next_btn.click(next_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress])
     prev_btn.click(prev_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress])
     show.change(reveal, inputs=[sentence, show], outputs=hidden)
