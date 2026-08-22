@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from urllib.parse import urlparse, parse_qs, urlencode
 
@@ -28,7 +29,10 @@ def extract_video_id(value):
 
 
 def clean_text(text):
-    noise = {"Copy", "Download", "Share", "Get Video Transcript", "Settings", "SettingsSettings", "Built with Gradio", "Use via API"}
+    noise = {
+        "Copy", "Download", "Share", "Get Video Transcript", "Settings",
+        "SettingsSettings", "Built with Gradio", "Use via API"
+    }
     out, seen = [], set()
     for raw in (text or "").replace("\r", "").splitlines():
         line = re.sub(r"\s+", " ", raw).strip()
@@ -55,19 +59,31 @@ def extract_strings(value, found):
             extract_strings(v, found)
 
 
+def proxy_from_env():
+    # Set TACTIQ_PROXY as a HF Space Secret/variable, e.g.
+    # http://username:password@proxy-host:port
+    # Leave empty to connect directly.
+    value = os.getenv("TACTIQ_PROXY", "").strip()
+    return value or None
+
+
 async def get_transcript(video_url):
     video_id = extract_video_id(video_url)
     if not video_id:
         return "❌ Link YouTube không hợp lệ."
 
-    # Tactiq accepts the YouTube URL through its own page/API workflow.
     target = TACTIQ_URL + "?" + urlencode({"yt": video_url})
+    proxy = proxy_from_env()
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        )
+        launch_kwargs = {
+            "headless": True,
+            "args":["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        }
+        if proxy:
+            launch_kwargs["proxy"] = {"server": proxy}
+
+        browser = await p.chromium.launch(**launch_kwargs)
         context = await browser.new_context(
             locale="en-US",
             viewport={"width": 1440, "height": 1000},
@@ -99,8 +115,6 @@ async def get_transcript(video_url):
             if response and response.status >= 400:
                 return f"❌ Tactiq HTTP {response.status}: {page.url}"
 
-            # First try the direct Tactiq URL. If it presents an input form,
-            # submit the video URL as the normal user-facing workflow.
             await page.wait_for_timeout(2500)
 
             inputs = [
@@ -115,16 +129,17 @@ async def get_transcript(video_url):
                         current = await loc.input_value()
                         if not current:
                             await loc.fill(video_url)
-                            filled = True
-                        else:
-                            filled = True
+                        filled = True
                         break
                 except Exception:
                     pass
 
             if filled:
                 for loc in [
-                    page.get_by_role("button", name=re.compile("Get Video Transcript|Transcript|Generate", re.I)).first,
+                    page.get_by_role(
+                        "button",
+                        name=re.compile("Get Video Transcript|Transcript|Generate", re.I),
+                    ).first,
                     page.locator("button[type='submit']").first,
                 ]:
                     try:
@@ -138,7 +153,6 @@ async def get_transcript(video_url):
             for _ in range(45):
                 await page.wait_for_timeout(1000)
 
-                # 1. Inspect network JSON returned by Tactiq.
                 for raw in list(network_texts):
                     try:
                         data = json.loads(raw)
@@ -150,7 +164,6 @@ async def get_transcript(video_url):
                     except Exception:
                         pass
 
-                # 2. Inspect rendered transcript DOM.
                 selectors = [
                     "[data-testid*='transcript']",
                     "[class*='transcript']",
@@ -168,7 +181,6 @@ async def get_transcript(video_url):
                     except Exception:
                         pass
 
-                # Do not mistake the static Tactiq page for a transcript.
                 lower = best.lower()
                 if len(best) >= 300 and "use via api" not in lower:
                     return best
@@ -202,9 +214,16 @@ async def run(url):
 
 with gr.Blocks(title="English Lab — Tactiq Transcript") as demo:
     gr.Markdown("# 🎧 English Lab — YouTube Transcript")
-    gr.Markdown("Tactiq + Playwright Async — không dùng yt-dlp, youtube-transcript-api hoặc Invidious.")
+    gr.Markdown(
+        "Tactiq + Playwright Async — không dùng yt-dlp, "
+        "youtube-transcript-api hoặc Invidious."
+    )
     with gr.Row():
-        url = gr.Textbox(label="YouTube URL", placeholder="https://www.youtube.com/watch?v=vxtvWovNKKE", scale=5)
+        url = gr.Textbox(
+            label="YouTube URL",
+            placeholder="https://www.youtube.com/watch?v=vxtvWovNKKE",
+            scale=5,
+        )
         button = gr.Button("🚀 Lấy English Transcript", variant="primary", scale=2)
     status = gr.Markdown("Sẵn sàng.")
     output = gr.Textbox(label="Transcript", lines=24, show_copy_button=True)
