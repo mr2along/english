@@ -4,15 +4,16 @@ import re
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote
 
 import gradio as gr
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import WebshareProxyConfig
 
-WEBSHARE_USERNAME = os.getenv("WEBSHARE_USERNAME", "").strip()
-WEBSHARE_PASSWORD = os.getenv("WEBSHARE_PASSWORD", "").strip()
+# Hugging Face Space secrets (exact names configured in the Space)
+WEBSHARE_USERNAME = os.getenv("WEBshare_PROXY_USERNAME", "").strip()
+WEBSHARE_PASSWORD = os.getenv("WEBshare_PROXY_PASSWORD", "").strip()
 TRANSCRIPT_LIST_TIMEOUT = int(os.getenv("TRANSCRIPT_LIST_TIMEOUT", "45"))
 TRANSCRIPT_FETCH_TIMEOUT = int(os.getenv("TRANSCRIPT_FETCH_TIMEOUT", "90"))
 PROXY_TEST_TIMEOUT = int(os.getenv("PROXY_TEST_TIMEOUT", "15"))
@@ -40,7 +41,9 @@ def extract_video_id(value: str):
 def make_proxy_url():
     if not (WEBSHARE_USERNAME and WEBSHARE_PASSWORD):
         return None
-    return f"http://{WEBSHARE_USERNAME}:{WEBSHARE_PASSWORD}@p.webshare.io:80/"
+    user = quote(WEBSHARE_USERNAME, safe="")
+    password = quote(WEBSHARE_PASSWORD, safe="")
+    return f"http://{user}:{password}@p.webshare.io:80/"
 
 
 def test_proxy():
@@ -200,7 +203,7 @@ def get_transcript(url: str):
         line(f"🎉 Hoàn tất: {len(lines)} câu/segment, {len(transcript):,} ký tự")
         line(f"⏱ Tổng thời gian: {time.time() - started:.2f}s")
         yield state(
-            "✅ Transcript đã tải xong — timestamp đã được giữ lại để đồng bộ YouTube player.",
+            "✅ Transcript đã tải xong — timestamp đã được giữ lại để đồng bộ player.",
             transcript,
         )
 
