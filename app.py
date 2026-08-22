@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import gradio as gr
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import GenericProxyConfig
+from youtube_transcript_api.proxies import WebshareProxyConfig
 
 USER = os.getenv("WEBSHARE_USERNAME", "").strip()
 PASSWORD = os.getenv("WEBSHARE_PASSWORD", "").strip()
@@ -76,11 +76,15 @@ def diagnostic():
 
 
 def make_api():
-    p = proxy_url()
     print("[TRANSCRIPT] Creating YouTubeTranscriptApi client...", flush=True)
-    if p:
+    if all([USER, PASSWORD, HOST, PORT]):
         print(f"[TRANSCRIPT] Webshare endpoint: {HOST}:{PORT}", flush=True)
-        return YouTubeTranscriptApi(proxy_config=GenericProxyConfig(http_url=p, https_url=p))
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(
+                proxy_username=USER,
+                proxy_password=PASSWORD,
+            )
+        )
     print("[TRANSCRIPT] Webshare credentials: NOT configured; using direct connection", flush=True)
     return YouTubeTranscriptApi()
 
@@ -297,7 +301,7 @@ def get_transcript(url):
         log(f"🎬 Player + transcript UI: {len(lines)} câu"); log("🔗 Click câu → seekTo(timestamp) → playVideo"); log(f"🎉 Hoàn tất: {len(lines)} segment, {len(transcript):,} ký tự"); log(f"⏱ Tổng thời gian: {time.time()-started:.2f}s")
         yield state("✅ Bài học đã sẵn sàng.",transcript)
     except Exception as e:
-        log(f"❌ LỖI: {type(e).__name__}: {e}"); traceback.print_exc(); yield state(f"❌ Không lấy được transcript cho {vid}.\\n\\n{type(e).__name__}: {e}")
+        log(f"❌ LỖI: {type(e).__name__}: {e}"); traceback.print_exc(); yield state(f"❌ Không lấy được transcript cho {vid}.\n\n{type(e).__name__}: {e}")
 
 
 CSS="""
