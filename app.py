@@ -1,6 +1,38 @@
 import asyncio
 import re
+import subprocess
+import sys
 from urllib.parse import quote, urlparse, parse_qs
+
+# Hugging Face Spaces installs Python packages from requirements.txt, but does not
+# automatically download Playwright's browser binaries. Install Chromium once at
+# startup before the first browser.launch().
+def ensure_playwright_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            try:
+                p.chromium.executable_path
+                # executable_path can be returned even when the file is absent;
+                # explicitly test it below.
+                import os
+                if os.path.exists(p.chromium.executable_path):
+                    return
+            except Exception:
+                pass
+    except Exception:
+        return
+
+    subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+        timeout=600,
+    )
+
+
+ensure_playwright_browser()
 
 import gradio as gr
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -14,7 +46,7 @@ def extract_video_id(value: str) -> str | None:
         return value
     try:
         p = urlparse(value)
-        if p.hostname in {"youtu.be"}:
+        if p.hostname == "youtu.be":
             return p.path.strip("/").split("/")[0][:11] or None
         if p.hostname and ("youtube.com" in p.hostname or "youtube-nocookie.com" in p.hostname):
             vid = parse_qs(p.query).get("v", [None])[0]
@@ -31,13 +63,10 @@ def extract_video_id(value: str) -> str | None:
 
 def clean_text(text: str) -> str:
     text = re.sub(r"\r", "", text or "")
-    lines = []
-    seen = set()
+    lines, seen = [], set()
     for raw in text.split("\n"):
         line = re.sub(r"\s+", " ", raw).strip()
-        if not line:
-            continue
-        if line in {"Copy", "Download", "Share", "Get Video Transcript", "Enter YouTube URL"}:
+        if not line or line in {"Copy", "Download", "Share", "Get Video Transcript", "Enter YouTube URL"}:
             continue
         if line not in seen:
             lines.append(line)
@@ -50,7 +79,11 @@ async def _tactiq_transcript(video_url: str) -> str:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ],
         )
         context = await browser.new_context(
             locale="en-US",
@@ -65,14 +98,12 @@ async def _tactiq_transcript(video_url: str) -> str:
             await page.goto(target, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(2500)
 
-            # Tactiq can render the transcript asynchronously. Give it time to finish.
-            transcript_markers = [
+            for marker in [
                 "text=Get Video Transcript",
                 "text=Transcript",
                 "text=Copy",
                 "text=Download",
-            ]
-            for marker in transcript_markers:
+            ]:
                 try:
                     await page.locator(marker).first.wait_for(timeout=8000, state="visible")
                     break
@@ -80,8 +111,6 @@ async def _tactiq_transcript(video_url: str) -> str:
                     pass
 
             await page.wait_for_timeout(4000)
-
-            # Prefer containers whose attributes/classes explicitly identify transcript content.
             selectors = [
                 "[data-testid*='transcript']",
                 "[class*='transcript']",
@@ -93,33 +122,35 @@ async def _tactiq_transcript(video_url: str) -> str:
             for selector in selectors:
                 try:
                     loc = page.locator(selector)
-                    count = min(await loc.count(), 8)
-                    for i in range(count):
+                    for i in range(min(await loc.count(), 8)):
                         txt = clean_text(await loc.nth(i).inner_text(timeout=3000))
                         if len(txt) >= 120:
                             candidates.append(txt)
                 except Exception:
                     continue
 
-            # If the transcript is in a shadowed/dynamically generated area, body text is the fallback.
-            body = clean_text(await page.locator("body").inner_text(timeout=10000))
-            candidates.append(body)
+            candidates.append(clean_text(await page.locator("body").inner_text(timeout=10000)))
 
-            # Score candidates: transcript text is usually long and has many sentence-like lines.
             def score(s: str) -> tuple[int, int]:
                 lines = s.splitlines()
-                sentence_lines = sum(1 for x in lines if len(x) > 20 and re.search(r"[.!?]$", x))
-                return (sentence_lines, min(len(s), 20000))
+                sentence_lines = sum(
+                    1 for x in lines if len(x) > 20 and re.search(r"[.!?]$", x)
+                )
+                return sentence_lines, min(len(s), 20000)
 
             best = max(candidates, key=score, default="")
-
-            # Remove obvious page chrome when the body fallback won.
-            for marker in ["How to get the transcript of a YouTube video", "Frequently Asked Questions"]:
+            for marker in [
+                "How to get the transcript of a YouTube video",
+                "Frequently Asked Questions",
+            ]:
                 if marker in best and best.count(marker) == 1:
                     best = best.split(marker, 1)[0].strip()
 
             if len(best) < 80:
-                raise RuntimeError("Tactiq không trả về transcript. Có thể video không có transcript hoặc Tactiq đã thay đổi giao diện.")
+                raise RuntimeError(
+                    "Tactiq không trả về transcript. Có thể video không có transcript "
+                    "hoặc Tactiq đã thay đổi giao diện."
+                )
             return best
         finally:
             await context.close()
@@ -151,8 +182,10 @@ textarea { font-size: 16px !important; line-height: 1.65 !important; }
 
 with gr.Blocks(title="English Lab — Tactiq Transcript", css=CSS) as demo:
     gr.Markdown("# 🎧 English Lab — YouTube Transcript")
-    gr.Markdown("Lấy transcript qua **Tactiq + Playwright Async**, không dùng yt-dlp, youtube-transcript-api hay Invidious.")
-
+    gr.Markdown(
+        "Lấy transcript qua **Tactiq + Playwright Async**. "
+        "Không dùng yt-dlp, youtube-transcript-api hay Invidious."
+    )
     with gr.Row():
         url = gr.Textbox(
             label="YouTube URL",
@@ -160,7 +193,6 @@ with gr.Blocks(title="English Lab — Tactiq Transcript", css=CSS) as demo:
             scale=5,
         )
         button = gr.Button("🚀 Lấy English Transcript", variant="primary", scale=2)
-
     status = gr.Markdown("Sẵn sàng.")
     output = gr.Textbox(
         label="Transcript",
@@ -171,7 +203,7 @@ with gr.Blocks(title="English Lab — Tactiq Transcript", css=CSS) as demo:
 
     def run(url_value):
         result = get_transcript(url_value)
-        if result.startswith("❌") or result.startswith("⚠️"):
+        if result.startswith(("❌", "⚠️")):
             return "❌ Lỗi", result
         return "✅ Đã lấy transcript", result
 
