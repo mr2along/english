@@ -3,7 +3,6 @@ import html
 import json
 import os
 import re
-from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import gradio as gr
@@ -84,8 +83,17 @@ def normalize_segments(raw):
     return out
 
 
+def make_http_client():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/139.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    return session
+
+
 def fetch_transcript(video_id, language="en"):
-    api = YouTubeTranscriptApi()
+    api = YouTubeTranscriptApi(http_client=make_http_client())
     transcripts = list(api.list(video_id))
     if not transcripts:
         return [], None
@@ -148,7 +156,7 @@ def transcript_html(segments):
     if not segments:
         return '<div class="transcript-panel"><div class="transcript-head">📝 English transcript</div><div class="empty">Chưa có transcript.</div></div>'
     rows = []
-    for i, s in enumerate(segments):
+    for s in segments:
         start = float(s.get("start", 0))
         mins, secs = int(start // 60), int(start % 60)
         rows.append(f'<button class="tline" data-start="{start:.3f}"><span class="tstamp">{mins:02d}:{secs:02d}</span><span class="ttext">{html.escape(s.get("text", ""))}</span></button>')
@@ -177,7 +185,7 @@ def load_transcript(url, language):
 
 def load_playlist(playlist_url, limit, language):
     try:
-        data = fetch_playlist(playlist_url, limit, language)
+        data = fetch_playlist(playlist_url, int(limit), language)
         ok = sum(1 for x in data["videos"] if x["transcript"])
         return f"✅ Đã xử lý {len(data['videos'])} video · {ok} video có transcript", json.dumps(data, ensure_ascii=False, indent=2)
     except Exception as exc:
@@ -216,7 +224,7 @@ with gr.Blocks(title=APP_TITLE, css=CSS, js=JS, theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🎧 English Lab\nLuyện nghe · đọc · phát âm với video YouTube và transcript")
     with gr.Row():
         url = gr.Textbox(label="YouTube URL hoặc Video ID", value=DEFAULT_URL, scale=5)
-        embed = gr.Button("🎬 Nhúng video", variant="primary")
+        embed = gr.Button("🎬 Nhúng video", variant="primary", scale=1)
     with gr.Row():
         language = gr.Dropdown(["en", "vi", "ja", "ko", "zh", "auto"], value="en", label="Ngôn ngữ transcript", scale=1)
         get_transcript = gr.Button("🚀 Lấy transcript từ YouTube", variant="primary", scale=2)
@@ -224,7 +232,6 @@ with gr.Blocks(title=APP_TITLE, css=CSS, js=JS, theme=gr.themes.Soft()) as demo:
     player = gr.HTML(value=player_html(get_video_id(DEFAULT_URL)), label="Video lesson")
     transcript = gr.HTML(value=transcript_html([]), label="English transcript")
     parsed = gr.Code(label="🔬 Parsed segments", language="json", lines=12)
-
     get_transcript.click(load_transcript, [url, language], [status, player, transcript, parsed])
     embed.click(load_video, url, [status, player, transcript, parsed])
 
