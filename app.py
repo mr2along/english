@@ -6,7 +6,6 @@ from urllib.parse import parse_qs, urlparse
 
 import gradio as gr
 
-
 APP_TITLE = "English Lab"
 MAX_TRANSCRIPT_CHARS = 2_000_000
 
@@ -15,24 +14,19 @@ def video_id(value: str):
     value = (value or "").strip()
     if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
         return value
-
     p = urlparse(value)
     host = (p.hostname or "").lower()
-
     if host == "youtu.be":
         candidate = p.path.strip("/").split("/")[0]
         return candidate if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate) else None
-
     if "youtube.com" in host or "youtube-nocookie.com" in host:
         candidate = parse_qs(p.query).get("v", [None])[0]
         if candidate and re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
             return candidate
-
         parts = [x for x in p.path.split("/") if x]
         if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
             candidate = parts[1]
             return candidate if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate) else None
-
     return None
 
 
@@ -40,7 +34,6 @@ def parse_time(value: str):
     value = value.strip().replace(",", ".")
     if re.fullmatch(r"\d+(?:\.\d+)?", value):
         return float(value)
-
     parts = value.split(":")
     try:
         if len(parts) == 3:
@@ -64,33 +57,19 @@ def parse_timestamped_text(text: str):
     lines = []
     for raw in text.splitlines():
         line = raw.strip()
-        if not line:
+        if not line or re.fullmatch(r"(?:WEBVTT|NOTE|STYLE|REGION)", line, flags=re.I):
             continue
-        if re.fullmatch(r"(?:WEBVTT|NOTE|STYLE|REGION)", line, flags=re.I):
-            continue
-
-        m = re.match(
-            r"^\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\s*-->\s*"
-            r"(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\s*(.*)$", line
-        )
+        m = re.match(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\s*-->\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\s*(.*)$", line)
         if m:
-            start = parse_time(m.group(1))
-            end = parse_time(m.group(2))
-            txt = clean_text(m.group(3))
+            start, end, txt = parse_time(m.group(1)), parse_time(m.group(2)), clean_text(m.group(3))
             if start is not None and txt:
                 lines.append({"start": start, "duration": max(0.0, (end or start) - start), "text": txt})
             continue
-
-        m = re.match(
-            r"^\s*\[?(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\]?\s*(?:[-–—|]\s*)?(.*)$",
-            line,
-        )
+        m = re.match(r"^\s*\[?(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\]?\s*(?:[-–—|]\s*)?(.*)$", line)
         if m:
-            start = parse_time(m.group(1))
-            txt = clean_text(m.group(2))
+            start, txt = parse_time(m.group(1)), clean_text(m.group(2))
             if start is not None and txt:
                 lines.append({"start": start, "duration": 0.0, "text": txt})
-
     for i, item in enumerate(lines):
         if i + 1 < len(lines) and item["duration"] <= 0:
             item["duration"] = max(0.0, lines[i + 1]["start"] - item["start"])
@@ -102,7 +81,6 @@ def parse_json_transcript(text: str):
         data = json.loads(text)
     except Exception:
         return []
-
     events = data.get("events") if isinstance(data, dict) else None
     if isinstance(events, list):
         result = []
@@ -112,15 +90,9 @@ def parse_json_transcript(text: str):
             segs = ev.get("segs") or []
             txt = "".join(str(s.get("utf8", "")) for s in segs if isinstance(s, dict))
             start = ev.get("tStartMs")
-            dur = ev.get("dDurationMs", 0)
             if txt.strip() and start is not None:
-                result.append({
-                    "start": float(start) / 1000,
-                    "duration": float(dur or 0) / 1000,
-                    "text": clean_text(txt),
-                })
+                result.append({"start": float(start) / 1000, "duration": float(ev.get("dDurationMs", 0) or 0) / 1000, "text": clean_text(txt)})
         return result
-
     if isinstance(data, list):
         result = []
         for item in data:
@@ -134,13 +106,8 @@ def parse_json_transcript(text: str):
                 start = parse_time(start)
             if start is None:
                 continue
-            result.append({
-                "start": float(start),
-                "duration": float(item.get("duration", 0) or 0),
-                "text": clean_text(txt),
-            })
+            result.append({"start": float(start), "duration": float(item.get("duration", 0) or 0), "text": clean_text(txt)})
         return result
-
     return []
 
 
@@ -149,13 +116,7 @@ def normalize_segments(lines):
     for i, item in enumerate(lines, 1):
         txt = clean_text(item.get("text", ""))
         if txt:
-            result.append({
-                "index": i,
-                "start": float(item.get("start", 0) or 0),
-                "duration": float(item.get("duration", 0) or 0),
-                "text": txt,
-            })
-
+            result.append({"index": i, "start": float(item.get("start", 0) or 0), "duration": float(item.get("duration", 0) or 0), "text": txt})
     for i, item in enumerate(result):
         if item["duration"] <= 0 and i + 1 < len(result):
             item["duration"] = max(0, result[i + 1]["start"] - item["start"])
@@ -166,15 +127,12 @@ def parse_transcript(text: str):
     text = (text or "").strip()
     if not text:
         return []
-
     lines = parse_timestamped_text(text)
     if lines:
         return normalize_segments(lines)
-
     lines = parse_json_transcript(text)
     if lines:
         return normalize_segments(lines)
-
     sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", text))
     return normalize_segments([{"start": 0.0, "duration": 0.0, "text": s} for s in sentences if s.strip()])
 
@@ -194,11 +152,30 @@ def read_uploaded_file(file_obj):
     raise ValueError(f"Không đọc được file transcript: {path}")
 
 
+def fmt_time(seconds):
+    seconds = max(0, int(float(seconds or 0)))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
 def build_player(vid, lines):
     safe_vid = html.escape(vid, quote=True)
-    data = html.escape(json.dumps(lines, ensure_ascii=False), quote=True)
+    iframe_src = f"https://www.youtube.com/embed/{safe_vid}?enablejsapi=1&playsinline=1&rel=0&origin=https%3A%2F%2Fhuggingface.co"
+    rows = []
+    for i, item in enumerate(lines):
+        start = float(item.get("start", 0) or 0)
+        safe_text = html.escape(item.get("text", ""))
+        rows.append(
+            f'<button type="button" class="el-line" data-start="{start:.3f}" data-index="{i}">'
+            f'<span class="el-time">{fmt_time(start) if start > 0 else "—"}</span>'
+            f'<span class="el-text"><span class="el-num">#{i + 1}</span>{safe_text}</span></button>'
+        )
+    body = "".join(rows) if rows else '<div class="el-empty">Chưa có transcript. Hãy import TXT/SRT/VTT/JSON hoặc dán transcript.</div>'
+    if lines and not any(float(x.get("start", 0) or 0) > 0 for x in lines):
+        body = '<div class="el-empty">Transcript không có timestamp. Import SRT/VTT hoặc dạng [00:12] câu để click-to-seek hoạt động.</div>' + body
     return f'''
-<div id="english-lab-player" class="el-shell" data-video-id="{safe_vid}" data-lines="{data}">
+<div class="el-shell" data-video-id="{safe_vid}">
 <style>
 .el-shell{{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172033}}
 .el-grid{{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(300px,.85fr);gap:18px}}
@@ -216,46 +193,21 @@ def build_player(vid, lines):
 .el-btn{{border:1px solid #dce2ea;background:#fff;border-radius:10px;padding:8px 12px;font-weight:650;cursor:pointer}}
 .el-btn.primary{{background:#2563eb;color:#fff;border-color:#2563eb}}
 .el-tip{{padding:10px 16px;font-size:12px;color:#69768a;background:#f8fafc}}
-.el-empty{{padding:28px;color:#69768a;text-align:center}}
+.el-empty{{padding:20px;color:#69768a;text-align:center;font-size:13px}}
 @media(max-width:850px){{.el-grid{{grid-template-columns:1fr}}.el-transcript{{height:420px}}}}
 </style>
 <div class="el-grid">
 <section class="el-card">
   <div class="el-head"><div><div class="el-title">🎬 Video lesson</div><div class="el-sub">Video nhúng trực tiếp từ YouTube</div></div></div>
-  <div class="el-video"><iframe id="el-youtube-frame" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>
-  <div class="el-tools"><button id="el-play" class="el-btn primary">▶ Phát câu</button><button id="el-replay" class="el-btn">↺ Phát lại</button><button id="el-top" class="el-btn">↑ Về đầu</button></div>
+  <div class="el-video"><iframe class="el-youtube-frame" src="{iframe_src}" title="YouTube English Lesson" allow="autoplay; encrypted-media; picture-in-picture; web-share" allowfullscreen></iframe></div>
+  <div class="el-tools"><button type="button" class="el-btn primary el-play">▶ Phát câu</button><button type="button" class="el-btn el-replay">↺ Phát lại</button><button type="button" class="el-btn el-top">↑ Về đầu</button></div>
   <div class="el-tip">💡 Click một câu để nhảy đến timestamp. Server không tải video YouTube.</div>
 </section>
 <section class="el-card">
-  <div class="el-head"><div><div class="el-title">📝 English transcript</div><div class="el-sub">Manual import · click câu để seek</div></div><div id="el-count" class="el-sub"></div></div>
-  <div id="el-lines" class="el-transcript"></div>
+  <div class="el-head"><div><div class="el-title">📝 English transcript</div><div class="el-sub">Manual import · click câu để seek</div></div><div class="el-sub">{len(lines)} câu</div></div>
+  <div class="el-transcript el-lines">{body}</div>
 </section>
 </div>
-<script>
-(function(){{
- const root=document.getElementById('english-lab-player'); if(!root)return;
- const vid=root.dataset.videoId; let lines=[]; try{{lines=JSON.parse(root.dataset.lines||'[]')}}catch(e){{}}
- const frame=document.getElementById('el-youtube-frame');
- frame.src='https://www.youtube.com/embed/'+encodeURIComponent(vid)+'?enablejsapi=1&playsinline=1&rel=0';
- const list=document.getElementById('el-lines'), buttons=[]; let active=-1;
- const hasTimes=lines.some(x=>Number(x.start)>0);
- const fmt=t=>{{t=Math.max(0,Number(t)||0);const h=Math.floor(t/3600),m=Math.floor((t%3600)/60),s=Math.floor(t%60);return (h?String(h).padStart(2,'0')+':':'')+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0')}};
- document.getElementById('el-count').textContent=lines.length+' câu';
- function esc(s){{return String(s).replace(/[&<>\"]/g,m=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}}[m]))}}
- function cmd(func,args){{try{{frame.contentWindow.postMessage(JSON.stringify({{event:'command',func:func,args:args||[]}}),'*')}}catch(e){{}}}}
- function seek(t){{if(!hasTimes)return;cmd('seekTo',[Number(t)||0,true]);cmd('playVideo',[])}}
- lines.forEach((x,i)=>{{const b=document.createElement('button');b.className='el-line';b.type='button';const tm=Number(x.start)>0?fmt(x.start):'—';b.innerHTML='<span class="el-time">'+tm+'</span><span class="el-text"><span class="el-num">#'+(i+1)+'</span>'+esc(x.text)+'</span>';b.onclick=()=>seek(x.start);list.appendChild(b);buttons.push(b)}});
- if(!lines.length)list.innerHTML='<div class="el-empty">Chưa có transcript. Hãy import TXT/SRT/VTT/JSON hoặc dán transcript.</div>';
- if(!hasTimes&&lines.length){{const tip=document.createElement('div');tip.className='el-empty';tip.textContent='Transcript không có timestamp. Import SRT/VTT hoặc dạng [00:12] câu để click-to-seek hoạt động.';list.prepend(tip)}}
- function setActive(i){{if(i===active)return;active=i;buttons.forEach((b,j)=>b.classList.toggle('active',j===i));if(i>=0)buttons[i]?.scrollIntoView({{block:'nearest',behavior:'smooth'}})}}
- function current(t){{let i=-1;for(let j=0;j<lines.length;j++){{const a=+lines[j].start||0,b=j+1<lines.length?(+lines[j+1].start||Infinity):Infinity;if(t>=a&&t<b){{i=j;break}}}}return i}}
- window.addEventListener('message',e=>{{if(typeof e.data!=='string')return;let d;try{{d=JSON.parse(e.data)}}catch(_){{return}};const t=d?.info?.currentTime??d?.infoDelivery?.currentTime;if(typeof t==='number')setActive(current(t))}});
- document.getElementById('el-play').onclick=()=>seek(lines[Math.max(active,0)]?.start||0);
- document.getElementById('el-replay').onclick=()=>{{if(active>=0)seek(lines[active].start)}};
- document.getElementById('el-top').onclick=()=>seek(0);
- setInterval(()=>cmd('getCurrentTime',[]),700);
-}})();
-</script>
 </div>'''
 
 
@@ -270,12 +222,12 @@ def process_lesson(url, transcript_text, transcript_file):
         if len(transcript_text) > MAX_TRANSCRIPT_CHARS:
             return "❌ Transcript quá lớn.", "", "", ""
         if not transcript_text:
-            return "⚠️ Video đã sẵn sàng. Hãy dán transcript hoặc import file.", build_player(vid, []), "", ""
+            return f"⚠️ Video đã sẵn sàng: {vid}. Hãy dán transcript hoặc import file.", build_player(vid, []), "", ""
         segments = parse_transcript(transcript_text)
         if not segments:
             return "❌ Không đọc được transcript.", "", "", ""
         mode = "timestamp" if any(x["start"] > 0 for x in segments) else "text-only"
-        return (f"✅ Đã nạp video {vid} · {len(segments)} câu · mode={mode}", build_player(vid, segments), transcript_text, json.dumps(segments, ensure_ascii=False, indent=2))
+        return f"✅ Đã nạp video {vid} · {len(segments)} câu · mode={mode}", build_player(vid, segments), transcript_text, json.dumps(segments, ensure_ascii=False, indent=2)
     except Exception as exc:
         return f"❌ Lỗi import transcript: {type(exc).__name__}: {exc}", "", "", ""
 
@@ -298,7 +250,91 @@ CUSTOM_CSS = """
 """
 
 
-with gr.Blocks(title=APP_TITLE, css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
+CUSTOM_JS = r"""
+(() => {
+  const players = new WeakMap();
+  const postCommand = (frame, func, args = []) => {
+    if (!frame || !frame.contentWindow) return;
+    frame.contentWindow.postMessage(JSON.stringify({event:'command', func, args}), '*');
+  };
+  const activate = (shell, index) => {
+    shell.querySelectorAll('.el-line').forEach((b, i) => b.classList.toggle('active', i === index));
+    const active = shell.querySelector('.el-line.active');
+    if (active) active.scrollIntoView({block:'nearest', behavior:'smooth'});
+  };
+  const currentIndex = (shell, t) => {
+    const rows = [...shell.querySelectorAll('.el-line')];
+    let found = -1;
+    rows.forEach((row, i) => {
+      const a = Number(row.dataset.start || 0);
+      const b = i + 1 < rows.length ? Number(rows[i+1].dataset.start || Infinity) : Infinity;
+      if (t >= a && t < b) found = i;
+    });
+    return found;
+  };
+  const init = (shell) => {
+    if (!shell || players.has(shell)) return;
+    const frame = shell.querySelector('.el-youtube-frame');
+    const rows = shell.querySelectorAll('.el-line');
+    const hasTimes = [...rows].some(r => Number(r.dataset.start || 0) > 0);
+    if (!frame) return;
+    const state = {frame, timer:null, active:-1};
+    players.set(shell, state);
+    rows.forEach(row => row.addEventListener('click', () => {
+      if (!hasTimes) return;
+      const t = Number(row.dataset.start || 0);
+      postCommand(frame, 'seekTo', [t, true]);
+      postCommand(frame, 'playVideo', []);
+      activate(shell, Number(row.dataset.index || 0));
+    }));
+    shell.querySelector('.el-play')?.addEventListener('click', () => {
+      const row = shell.querySelector('.el-line.active') || rows[0];
+      if (!row || !hasTimes) return;
+      postCommand(frame, 'seekTo', [Number(row.dataset.start || 0), true]);
+      postCommand(frame, 'playVideo', []);
+    });
+    shell.querySelector('.el-replay')?.addEventListener('click', () => {
+      const row = shell.querySelector('.el-line.active');
+      if (row) {
+        postCommand(frame, 'seekTo', [Number(row.dataset.start || 0), true]);
+        postCommand(frame, 'playVideo', []);
+      }
+    });
+    shell.querySelector('.el-top')?.addEventListener('click', () => {
+      postCommand(frame, 'seekTo', [0, true]);
+      postCommand(frame, 'playVideo', []);
+    });
+    const poll = () => postCommand(frame, 'getCurrentTime', []);
+    state.timer = setInterval(poll, 800);
+  };
+  const scan = (node = document) => {
+    if (node.nodeType === 1 && node.matches?.('.el-shell')) init(node);
+    node.querySelectorAll?.('.el-shell').forEach(init);
+  };
+  const observer = new MutationObserver(muts => muts.forEach(m => m.addedNodes.forEach(n => scan(n))));
+  observer.observe(document.documentElement, {childList:true, subtree:true});
+  scan();
+  window.addEventListener('message', e => {
+    if (typeof e.data !== 'string') return;
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+    const t = data?.info?.currentTime ?? data?.infoDelivery?.currentTime;
+    if (typeof t !== 'number') return;
+    document.querySelectorAll('.el-shell').forEach(shell => {
+      const state = players.get(shell);
+      if (!state) return;
+      const idx = currentIndex(shell, t);
+      if (idx >= 0 && idx !== state.active) {
+        state.active = idx;
+        activate(shell, idx);
+      }
+    });
+  });
+})();
+"""
+
+
+with gr.Blocks(title=APP_TITLE, css=CUSTOM_CSS, js=CUSTOM_JS, theme=gr.themes.Soft()) as demo:
     gr.HTML('<div id="hero"><h1>🎧 English Lab</h1><div>Luyện nghe · đọc · phát âm với video YouTube và transcript nhập thủ công</div></div>')
     with gr.Tab("🎬 YouTube Lesson"):
         gr.Markdown("### 1. Nhập video → 2. Import transcript → 3. Click từng câu để nhảy đúng thời điểm\nServer **không tải video YouTube và không gọi YouTube Transcript API**.")
@@ -308,7 +344,7 @@ with gr.Blocks(title=APP_TITLE, css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
             import_btn = gr.Button("🚀 Import transcript", variant="primary")
         with gr.Row():
             transcript_file = gr.File(label="📄 Import transcript — TXT / SRT / VTT / JSON", file_types=[".txt", ".srt", ".vtt", ".json"], type="filepath")
-            transcript_text = gr.Textbox(label="📝 Hoặc dán transcript thủ công", placeholder="[00:00] Hello, welcome to English Lab.\n[00:05] Today we are going to practice listening.\n\nHoặc SRT/VTT: 00:00:05,000 --> 00:00:08,000", lines=10)
+            transcript_text = gr.Textbox(label="📝 Hoặc dán transcript thủ công", placeholder="[00:00] Hello, welcome to English Lab.\n[00:05] Today we are going to practice listening.", lines=10)
         status = gr.Markdown("Sẵn sàng.")
         player = gr.HTML(label="Video + Transcript")
         raw_output = gr.Textbox(label="📄 Transcript gốc", lines=10)
@@ -320,13 +356,13 @@ with gr.Blocks(title=APP_TITLE, css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
 ### Quy trình mới
 1. Mở video YouTube cần luyện.
-2. Dùng chức năng **Transcript** của YouTube để sao chép/xuất transcript.
+2. Dùng chức năng Transcript của YouTube để sao chép/xuất transcript.
 3. Trong English Lab, dán transcript hoặc import `.txt`, `.srt`, `.vtt`, `.json`.
 4. Nếu transcript có timestamp, click từng câu để video nhảy tới đúng vị trí.
 5. Dùng **Phát câu / Phát lại** để luyện nghe và đọc.
 
 ### Vì sao đổi kiến trúc?
-HF Space trước đây cố tải `www.youtube.com` qua Webshare nhưng kết nối HTTPS tới YouTube bị `SSLEOFError`. Kiến trúc mới không phụ thuộc đường kết nối server → YouTube để lấy transcript: trình duyệt của người dùng phát video trực tiếp từ YouTube, còn Space chỉ xử lý transcript mà người dùng cung cấp.
+HF Space không tải video hoặc transcript từ YouTube. Trình duyệt người dùng phát video trực tiếp từ YouTube, còn Space chỉ xử lý transcript do người dùng cung cấp.
 """)
 
 if __name__ == "__main__":
