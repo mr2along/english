@@ -26,11 +26,12 @@ def youtube_embed(vid: str | None) -> str:
     if not vid:
         return "<div class='yt-empty'>🎬 Chọn video để bắt đầu.</div>"
     safe = html.escape(vid, quote=True)
-    return ("<div class='yt-wrap'><iframe "
-            f"src='https://www.youtube.com/embed/{safe}?enablejsapi=1&rel=0' "
-            "title='YouTube video' frameborder='0' allow='accelerometer; autoplay; "
-            "clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share' "
-            "allowfullscreen></iframe></div>")
+    return (
+        "<div class='yt-wrap'><iframe id='english-youtube-player' "
+        f"src='https://www.youtube.com/embed/{safe}?enablejsapi=1&origin=https://huggingface.co&rel=0&playsinline=1' "
+        "title='YouTube video' frameborder='0' allow='accelerometer; autoplay; clipboard-write; encrypted-media; "
+        "gyroscope; picture-in-picture; web-share' allowfullscreen></iframe></div>"
+    )
 
 
 def clean_text(text: str) -> str:
@@ -58,8 +59,6 @@ def build_sentences(transcript: Any) -> list[dict[str, Any]]:
             duration = float(getattr(s, "duration", 0) or 0)
             rows.append({"start": start, "end": start + max(duration, .1), "text": text})
 
-    # Merge caption fragments into useful English-learning sentences while
-    # retaining the original YouTube timestamps.
     out, buf = [], None
     for row in rows:
         if buf is None:
@@ -109,27 +108,27 @@ def load_video(url: str):
     vid = video_id(url)
     if not vid:
         msg = "❌ Hãy nhập URL YouTube của một video cụ thể."
-        return msg, empty_state(), "", "🔒 Transcript đang ẩn.", "", 0, msg, youtube_embed(None)
+        return msg, empty_state(), "", "🔒 Transcript đang ẩn.", "", 0, 0, msg, youtube_embed(None)
     try:
         sentences, language = fetch_transcript(url)
     except Exception as exc:
         msg = f"### 🎬 Video `{vid}`\n\n❌ **Không lấy được transcript.**\n\n`{type(exc).__name__}: {str(exc)[:2500]}`"
-        return msg, {"sentences": [], "index": 0, "id": vid, "url": url}, "", "🔒 Transcript đang ẩn.", "", 0, msg, youtube_embed(vid)
+        return msg, {"sentences": [], "index": 0, "id": vid, "url": url}, "", "🔒 Transcript đang ẩn.", "", 0, 0, msg, youtube_embed(vid)
 
     state = {"sentences": sentences, "index": 0, "id": vid, "url": url}
     first = sentences[0]
     title = f"### 🎬 Video `{vid}`\n\n✅ **youtube-transcript-api + Webshare** · language: **{language}** · **{len(sentences)} câu**"
-    return title, state, first["text"], "🔒 Transcript đang ẩn.", "", 0, "", youtube_embed(vid)
+    return title, state, first["text"], "🔒 Transcript đang ẩn.", "", 0, first["start"], "", youtube_embed(vid)
 
 
 def choose_sentence(state, index):
     if not state or not state.get("sentences"):
-        return "🎬 Chưa có transcript.", "", "🔒 Transcript đang ẩn.", "", 0
+        return "🎬 Chưa có transcript.", "", "🔒 Transcript đang ẩn.", "", 0, 0
     sentences = state["sentences"]
     i = max(0, min(int(index), len(sentences) - 1))
     state["index"] = i
     s = sentences[i]
-    return f"### Câu {i + 1}/{len(sentences)} · {s['start']:.1f}s", s["text"], "🔒 Transcript đang ẩn.", "", i
+    return f"### Câu {i + 1}/{len(sentences)} · {s['start']:.1f}s → {s['end']:.1f}s", s["text"], "🔒 Transcript đang ẩn.", "", i, s["start"]
 
 
 def next_sentence(state):
@@ -161,9 +160,45 @@ CSS = """
 .yt-wrap{position:relative;width:100%;padding-top:56.25%;overflow:hidden;border-radius:14px;background:#000}
 .yt-wrap iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
 .yt-empty{padding:60px 20px;text-align:center;background:#111;color:#aaa;border-radius:14px}
+#seek-time{display:none!important}
 """
 
-with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft(), css=CSS) as demo:
+# Runs in the browser. It talks to the YouTube IFrame Player API through
+# postMessage, so no YouTube API key is required. The server only sends the
+# timestamp; the browser performs the seek.
+YOUTUBE_JS = """
+() => {
+  const seekToSentence = (seconds) => {
+    const iframe = document.getElementById('english-youtube-player');
+    if (!iframe || !Number.isFinite(Number(seconds))) return;
+    const message = JSON.stringify({
+      event: 'command',
+      func: 'seekTo',
+      args: [Number(seconds), true]
+    });
+    iframe.contentWindow.postMessage(message, 'https://www.youtube.com');
+    // Retry once after the iframe has had time to initialize/re-render.
+    setTimeout(() => {
+      const current = document.getElementById('english-youtube-player');
+      if (current) current.contentWindow.postMessage(message, 'https://www.youtube.com');
+    }, 350);
+  };
+
+  window.__englishLabSeek = seekToSentence;
+  return [];
+}
+"""
+
+SEEK_JS = """
+(seconds) => {
+  if (window.__englishLabSeek) {
+    window.__englishLabSeek(Number(seconds));
+  }
+  return [];
+}
+"""
+
+with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft(), css=CSS, js=YOUTUBE_JS) as demo:
     gr.Markdown("# 🇬🇧 English Learning Lab\nListening · Shadowing · Speaking · Grammar · Vocabulary · Quiz · Progress")
     state = gr.State(empty_state())
 
@@ -179,6 +214,9 @@ with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft(), css=CSS) as demo:
             prev_btn = gr.Button("◀ Câu trước")
             next_btn = gr.Button("Câu tiếp ▶")
         progress = gr.Number(value=0, label="Sentence", precision=0)
+        # Hidden numeric output carrying the real YouTube timestamp of the
+        # currently selected sentence. JS observes its value and seeks the player.
+        seek_time = gr.Number(value=0, elem_id="seek-time", visible=False)
         sentence = gr.Textbox(label="Câu hiện tại", interactive=False, lines=2)
         hidden = gr.Markdown("🔒 Transcript đang ẩn.")
         show = gr.Checkbox(label="👁 Hiện câu", value=False)
@@ -191,11 +229,15 @@ with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft(), css=CSS) as demo:
         teacher_btn = gr.Button("🧑‍🏫 Phân tích câu")
         teacher_out = gr.Markdown("")
 
-    import_btn.click(load_video, inputs=url,
-        outputs=[lesson_title, state, sentence, hidden, translation, progress, status, video_frame])
+    import_btn.click(
+        load_video,
+        inputs=url,
+        outputs=[lesson_title, state, sentence, hidden, translation, progress, seek_time, status, video_frame],
+    )
+    seek_time.change(fn=None, inputs=seek_time, outputs=None, js=SEEK_JS)
     show.change(reveal, inputs=[sentence, show], outputs=hidden)
-    prev_btn.click(prev_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress])
-    next_btn.click(next_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress])
+    prev_btn.click(prev_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress, seek_time])
+    next_btn.click(next_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress, seek_time])
     translate_btn.click(translate, inputs=sentence, outputs=translation)
     teacher_btn.click(teacher, inputs=sentence, outputs=teacher_out)
     score_btn.click(lambda: "🎧 Chấm phát âm sẽ được nối với Whisper/phoneme scoring ở bước tiếp theo.", outputs=score)
