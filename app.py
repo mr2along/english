@@ -89,9 +89,9 @@ def parse_json_transcript(text: str):
                 continue
             segs = ev.get("segs") or []
             txt = "".join(str(s.get("utf8", "")) for s in segs if isinstance(s, dict))
-            start = ev.get("tStartMs")
+            start, dur = ev.get("tStartMs"), ev.get("dDurationMs", 0)
             if txt.strip() and start is not None:
-                result.append({"start": float(start) / 1000, "duration": float(ev.get("dDurationMs", 0) or 0) / 1000, "text": clean_text(txt)})
+                result.append({"start": float(start) / 1000, "duration": float(dur or 0) / 1000, "text": clean_text(txt)})
         return result
     if isinstance(data, list):
         result = []
@@ -161,21 +161,16 @@ def fmt_time(seconds):
 
 def build_player(vid, lines):
     safe_vid = html.escape(vid, quote=True)
-    iframe_src = f"https://www.youtube.com/embed/{safe_vid}?enablejsapi=1&playsinline=1&rel=0&origin=https%3A%2F%2Fhuggingface.co"
+    iframe_src = f"https://www.youtube-nocookie.com/embed/{safe_vid}?enablejsapi=1&playsinline=1&rel=0"
     rows = []
     for i, item in enumerate(lines):
         start = float(item.get("start", 0) or 0)
         safe_text = html.escape(item.get("text", ""))
-        rows.append(
-            f'<button type="button" class="el-line" data-start="{start:.3f}" data-index="{i}">'
-            f'<span class="el-time">{fmt_time(start) if start > 0 else "—"}</span>'
-            f'<span class="el-text"><span class="el-num">#{i + 1}</span>{safe_text}</span></button>'
-        )
+        rows.append(f'<button type="button" class="el-line" data-start="{start:.3f}" data-index="{i}"><span class="el-time">{fmt_time(start) if start > 0 else "—"}</span><span class="el-text"><span class="el-num">#{i + 1}</span>{safe_text}</span></button>')
     body = "".join(rows) if rows else '<div class="el-empty">Chưa có transcript. Hãy import TXT/SRT/VTT/JSON hoặc dán transcript.</div>'
     if lines and not any(float(x.get("start", 0) or 0) > 0 for x in lines):
         body = '<div class="el-empty">Transcript không có timestamp. Import SRT/VTT hoặc dạng [00:12] câu để click-to-seek hoạt động.</div>' + body
-    return f'''
-<div class="el-shell" data-video-id="{safe_vid}">
+    return f'''<div class="el-shell" data-video-id="{safe_vid}">
 <style>
 .el-shell{{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172033}}
 .el-grid{{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(300px,.85fr);gap:18px}}
@@ -196,19 +191,7 @@ def build_player(vid, lines):
 .el-empty{{padding:20px;color:#69768a;text-align:center;font-size:13px}}
 @media(max-width:850px){{.el-grid{{grid-template-columns:1fr}}.el-transcript{{height:420px}}}}
 </style>
-<div class="el-grid">
-<section class="el-card">
-  <div class="el-head"><div><div class="el-title">🎬 Video lesson</div><div class="el-sub">Video nhúng trực tiếp từ YouTube</div></div></div>
-  <div class="el-video"><iframe class="el-youtube-frame" src="{iframe_src}" title="YouTube English Lesson" allow="autoplay; encrypted-media; picture-in-picture; web-share" allowfullscreen></iframe></div>
-  <div class="el-tools"><button type="button" class="el-btn primary el-play">▶ Phát câu</button><button type="button" class="el-btn el-replay">↺ Phát lại</button><button type="button" class="el-btn el-top">↑ Về đầu</button></div>
-  <div class="el-tip">💡 Click một câu để nhảy đến timestamp. Server không tải video YouTube.</div>
-</section>
-<section class="el-card">
-  <div class="el-head"><div><div class="el-title">📝 English transcript</div><div class="el-sub">Manual import · click câu để seek</div></div><div class="el-sub">{len(lines)} câu</div></div>
-  <div class="el-transcript el-lines">{body}</div>
-</section>
-</div>
-</div>'''
+<div class="el-grid"><section class="el-card"><div class="el-head"><div><div class="el-title">🎬 Video lesson</div><div class="el-sub">Video nhúng trực tiếp từ YouTube</div></div></div><div class="el-video"><iframe class="el-youtube-frame" src="{iframe_src}" title="YouTube English Lesson" allow="autoplay; encrypted-media; picture-in-picture; web-share" allowfullscreen></iframe></div><div class="el-tools"><button type="button" class="el-btn primary el-play">▶ Phát câu</button><button type="button" class="el-btn el-replay">↺ Phát lại</button><button type="button" class="el-btn el-top">↑ Về đầu</button></div><div class="el-tip">💡 Click một câu để nhảy đến timestamp. Server không tải video YouTube.</div></section><section class="el-card"><div class="el-head"><div><div class="el-title">📝 English transcript</div><div class="el-sub">Manual import · click câu để seek</div></div><div class="el-sub">{len(lines)} câu</div></div><div class="el-transcript el-lines">{body}</div></section></div></div>'''
 
 
 def process_lesson(url, transcript_text, transcript_file):
@@ -242,103 +225,30 @@ def load_video_only(url):
 def import_transcript(url, transcript_text, transcript_file):
     return process_lesson(url, transcript_text, transcript_file)
 
-
 CUSTOM_CSS = """
 .gradio-container { max-width: 1400px !important; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; }
 #hero { border-radius: 18px; padding: 28px 30px; background: linear-gradient(135deg,#111827 0%,#1e3a8a 55%,#2563eb 100%); color:white; margin-bottom:18px; }
 #hero h1 { color:white !important; margin-bottom:6px; }
 """
 
-
 CUSTOM_JS = r"""
 (() => {
   const players = new WeakMap();
-  const postCommand = (frame, func, args = []) => {
-    if (!frame || !frame.contentWindow) return;
-    frame.contentWindow.postMessage(JSON.stringify({event:'command', func, args}), '*');
-  };
-  const activate = (shell, index) => {
-    shell.querySelectorAll('.el-line').forEach((b, i) => b.classList.toggle('active', i === index));
-    const active = shell.querySelector('.el-line.active');
-    if (active) active.scrollIntoView({block:'nearest', behavior:'smooth'});
-  };
-  const currentIndex = (shell, t) => {
-    const rows = [...shell.querySelectorAll('.el-line')];
-    let found = -1;
-    rows.forEach((row, i) => {
-      const a = Number(row.dataset.start || 0);
-      const b = i + 1 < rows.length ? Number(rows[i+1].dataset.start || Infinity) : Infinity;
-      if (t >= a && t < b) found = i;
-    });
-    return found;
-  };
-  const init = (shell) => {
-    if (!shell || players.has(shell)) return;
-    const frame = shell.querySelector('.el-youtube-frame');
-    const rows = shell.querySelectorAll('.el-line');
-    const hasTimes = [...rows].some(r => Number(r.dataset.start || 0) > 0);
-    if (!frame) return;
-    const state = {frame, timer:null, active:-1};
-    players.set(shell, state);
-    rows.forEach(row => row.addEventListener('click', () => {
-      if (!hasTimes) return;
-      const t = Number(row.dataset.start || 0);
-      postCommand(frame, 'seekTo', [t, true]);
-      postCommand(frame, 'playVideo', []);
-      activate(shell, Number(row.dataset.index || 0));
-    }));
-    shell.querySelector('.el-play')?.addEventListener('click', () => {
-      const row = shell.querySelector('.el-line.active') || rows[0];
-      if (!row || !hasTimes) return;
-      postCommand(frame, 'seekTo', [Number(row.dataset.start || 0), true]);
-      postCommand(frame, 'playVideo', []);
-    });
-    shell.querySelector('.el-replay')?.addEventListener('click', () => {
-      const row = shell.querySelector('.el-line.active');
-      if (row) {
-        postCommand(frame, 'seekTo', [Number(row.dataset.start || 0), true]);
-        postCommand(frame, 'playVideo', []);
-      }
-    });
-    shell.querySelector('.el-top')?.addEventListener('click', () => {
-      postCommand(frame, 'seekTo', [0, true]);
-      postCommand(frame, 'playVideo', []);
-    });
-    const poll = () => postCommand(frame, 'getCurrentTime', []);
-    state.timer = setInterval(poll, 800);
-  };
-  const scan = (node = document) => {
-    if (node.nodeType === 1 && node.matches?.('.el-shell')) init(node);
-    node.querySelectorAll?.('.el-shell').forEach(init);
-  };
-  const observer = new MutationObserver(muts => muts.forEach(m => m.addedNodes.forEach(n => scan(n))));
-  observer.observe(document.documentElement, {childList:true, subtree:true});
-  scan();
-  window.addEventListener('message', e => {
-    if (typeof e.data !== 'string') return;
-    let data;
-    try { data = JSON.parse(e.data); } catch { return; }
-    const t = data?.info?.currentTime ?? data?.infoDelivery?.currentTime;
-    if (typeof t !== 'number') return;
-    document.querySelectorAll('.el-shell').forEach(shell => {
-      const state = players.get(shell);
-      if (!state) return;
-      const idx = currentIndex(shell, t);
-      if (idx >= 0 && idx !== state.active) {
-        state.active = idx;
-        activate(shell, idx);
-      }
-    });
-  });
+  const postCommand = (frame, func, args = []) => { if (frame?.contentWindow) frame.contentWindow.postMessage(JSON.stringify({event:'command', func, args}), '*'); };
+  const activate = (shell, index) => { shell.querySelectorAll('.el-line').forEach((b,i)=>b.classList.toggle('active',i===index)); shell.querySelector('.el-line.active')?.scrollIntoView({block:'nearest',behavior:'smooth'}); };
+  const currentIndex = (shell,t) => { const rows=[...shell.querySelectorAll('.el-line')]; let found=-1; rows.forEach((row,i)=>{const a=Number(row.dataset.start||0),b=i+1<rows.length?Number(rows[i+1].dataset.start||Infinity):Infinity;if(t>=a&&t<b)found=i;}); return found; };
+  const init = shell => { if(!shell||players.has(shell))return; const frame=shell.querySelector('.el-youtube-frame'),rows=shell.querySelectorAll('.el-line'); if(!frame)return; const hasTimes=[...rows].some(r=>Number(r.dataset.start||0)>0); const state={frame,active:-1}; players.set(shell,state); rows.forEach(row=>row.addEventListener('click',()=>{if(!hasTimes)return;const t=Number(row.dataset.start||0);postCommand(frame,'seekTo',[t,true]);postCommand(frame,'playVideo',[]);activate(shell,Number(row.dataset.index||0));})); shell.querySelector('.el-play')?.addEventListener('click',()=>{const row=shell.querySelector('.el-line.active')||rows[0];if(row&&hasTimes){postCommand(frame,'seekTo',[Number(row.dataset.start||0),true]);postCommand(frame,'playVideo',[]);}}); shell.querySelector('.el-replay')?.addEventListener('click',()=>{const row=shell.querySelector('.el-line.active');if(row){postCommand(frame,'seekTo',[Number(row.dataset.start||0),true]);postCommand(frame,'playVideo',[]);}}); shell.querySelector('.el-top')?.addEventListener('click',()=>{postCommand(frame,'seekTo',[0,true]);postCommand(frame,'playVideo',[]);}); const poll=()=>postCommand(frame,'getCurrentTime',[]); state.timer=setInterval(poll,800); };
+  const scan=(node=document)=>{if(node.nodeType===1&&node.matches?.('.el-shell'))init(node);node.querySelectorAll?.('.el-shell').forEach(init);};
+  new MutationObserver(muts=>muts.forEach(m=>m.addedNodes.forEach(n=>scan(n)))).observe(document.documentElement,{childList:true,subtree:true}); scan();
+  window.addEventListener('message',e=>{if(typeof e.data!=='string')return;let data;try{data=JSON.parse(e.data);}catch{return;}const t=data?.info?.currentTime??data?.infoDelivery?.currentTime;if(typeof t!=='number')return;document.querySelectorAll('.el-shell').forEach(shell=>{const state=players.get(shell);if(!state)return;const idx=currentIndex(shell,t);if(idx>=0&&idx!==state.active){state.active=idx;activate(shell,idx);}});});
 })();
 """
-
 
 with gr.Blocks(title=APP_TITLE, css=CUSTOM_CSS, js=CUSTOM_JS, theme=gr.themes.Soft()) as demo:
     gr.HTML('<div id="hero"><h1>🎧 English Lab</h1><div>Luyện nghe · đọc · phát âm với video YouTube và transcript nhập thủ công</div></div>')
     with gr.Tab("🎬 YouTube Lesson"):
         gr.Markdown("### 1. Nhập video → 2. Import transcript → 3. Click từng câu để nhảy đúng thời điểm\nServer **không tải video YouTube và không gọi YouTube Transcript API**.")
-        yt_url = gr.Textbox(label="YouTube URL hoặc Video ID", placeholder="https://www.youtube.com/watch?v=... hoặc 11 ký tự Video ID")
+        yt_url = gr.Textbox(label="YouTube URL hoặc Video ID", value="https://www.youtube.com/watch?v=vxtvWovNKKE", placeholder="https://www.youtube.com/watch?v=... hoặc 11 ký tự Video ID")
         with gr.Row():
             load_btn = gr.Button("🎬 Nhúng video", variant="secondary")
             import_btn = gr.Button("🚀 Import transcript", variant="primary")
