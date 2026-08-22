@@ -14,4 +14,5 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
 
 WORKDIR /app
 COPY . /app
+EXPOSE 7860
 CMD ["python", "app.py"]
