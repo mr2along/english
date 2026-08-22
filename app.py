@@ -1,6 +1,9 @@
 import os
 import re
 import html
+import json
+import subprocess
+import tempfile
 from typing import Any
 
 import gradio as gr
@@ -48,8 +51,69 @@ def split_sentences(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _yt_dlp_caption_fallback(vid: str):
+    """Fallback for HF/cloud IPs where youtube-transcript-api is blocked.
+
+    yt-dlp is used only for the subtitle track, not for audio/video download.
+    Android clients are tried first because YouTube can expose caption metadata
+    differently to different clients.
+    """
+    workdir = tempfile.mkdtemp(prefix="ytcaps-")
+    url = f"https://www.youtube.com/watch?v={vid}"
+    errors = []
+    clients = ["android", "web_safari", "web"]
+
+    for client in clients:
+        outtmpl = os.path.join(workdir, "caption.%(ext)s")
+        cmd = [
+            "yt-dlp", url,
+            "--skip-download",
+            "--write-auto-subs",
+            "--write-subs",
+            "--sub-langs", "en,en-US,en-GB",
+            "--sub-format", "vtt",
+            "--output", outtmpl,
+            "--no-playlist",
+            "--force-ipv4",
+            "--socket-timeout", "20",
+            "--retries", "2",
+            "--extractor-args", f"youtube:player_client={client}",
+            "--no-warnings",
+        ]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            files = [os.path.join(workdir, x) for x in os.listdir(workdir) if x.endswith(".vtt")]
+            if p.returncode == 0 and files:
+                # Prefer English auto-generated track when yt-dlp produced more than one.
+                chosen = next((f for f in files if ".en." in f or ".en-US." in f or ".en-GB." in f), files[0])
+                rows = []
+                block_re = re.compile(
+                    r"(?m)^(\d{2}:\d{2}:\d{2}[\.,]\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}[\.,]\d{3}).*?\n(.*?)(?=\n\n|\Z)",
+                    re.S,
+                )
+
+                def ts(v):
+                    v = v.replace(",", ".")
+                    h, m, s = v.split(":")
+                    return int(h) * 3600 + int(m) * 60 + float(s)
+
+                raw = open(chosen, "r", encoding="utf-8", errors="ignore").read()
+                for m in block_re.finditer(raw):
+                    text = re.sub(r"<[^>]+>", " ", m.group(3))
+                    text = normalize_caption_text(text)
+                    if text and text.lower() not in {"♪", "[music]"}:
+                        rows.append({"text": text, "start": ts(m.group(1)), "duration": max(0.1, ts(m.group(2)) - ts(m.group(1)))})
+                sentences = split_sentences(rows)
+                if sentences:
+                    return sentences, f"yt-dlp YouTube English ({client})"
+            errors.append(f"yt-dlp {client}: {(p.stderr or p.stdout)[-900:]}")
+        except Exception as exc:
+            errors.append(f"yt-dlp {client}: {type(exc).__name__}: {exc}")
+    raise RuntimeError("; ".join(errors)[-3500:])
+
+
 def fetch_youtube_captions(url: str):
-    """Fetch YouTube English captions, explicitly preferring YouTube auto-generated English."""
+    """Fetch English captions, preferring YouTube English auto-generated tracks."""
     vid = video_id(url)
     if not vid:
         raise ValueError("Không nhận diện được YouTube video ID.")
@@ -59,41 +123,41 @@ def fetch_youtube_captions(url: str):
     api = YouTubeTranscriptApi()
     errors = []
 
-    # 1) Ask the API for the available tracks. Prefer generated English because
-    # that is the same English (auto-generated) track shown by YouTube itself.
+    # Primary path: youtube-transcript-api. It supports generated captions.
     try:
-        tracks = api.list(vid)
-        tracks = list(tracks)
+        tracks = list(api.list(vid))
         generated_en = [t for t in tracks if getattr(t, "is_generated", False) and str(getattr(t, "language_code", "")).startswith("en")]
         manual_en = [t for t in tracks if not getattr(t, "is_generated", False) and str(getattr(t, "language_code", "")).startswith("en")]
-
         for t in generated_en + manual_en:
             try:
-                fetched = t.fetch()
-                sentences = split_sentences(_ytt_rows(fetched))
+                sentences = split_sentences(_ytt_rows(t.fetch()))
                 if sentences:
                     kind = "auto-generated" if getattr(t, "is_generated", False) else "manual"
                     return sentences, f"YouTube English ({kind})"
             except Exception as exc:
                 errors.append(f"track {getattr(t, 'language_code', '?')}: {type(exc).__name__}: {exc}")
     except Exception as exc:
-        errors.append(f"list: {type(exc).__name__}: {exc}")
+        errors.append(f"youtube-transcript-api list: {type(exc).__name__}: {exc}")
 
-    # 2) Direct fetch for environments where listing tracks is restricted.
-    # This still uses YouTube's caption API and does NOT use Invidious.
+    # Some environments block transcript listing but allow direct fetch.
     for languages in (["en"], ["en-US"], ["en-GB"]):
         try:
-            fetched = api.fetch(vid, languages=languages)
-            sentences = split_sentences(_ytt_rows(fetched))
+            sentences = split_sentences(_ytt_rows(api.fetch(vid, languages=languages)))
             if sentences:
                 return sentences, "YouTube English captions"
         except Exception as exc:
             errors.append(f"fetch {languages[0]}: {type(exc).__name__}: {exc}")
 
-    msg = "\n".join(errors)[-5000:]
+    # HF/cloud fallback: try yt-dlp subtitle extraction with alternate clients.
+    try:
+        return _yt_dlp_caption_fallback(vid)
+    except Exception as exc:
+        errors.append(f"yt-dlp fallback: {type(exc).__name__}: {exc}")
+
     raise RuntimeError(
         "YouTube không trả được English captions từ môi trường hiện tại. "
-        "Video có thể có English (auto-generated) trên trình duyệt nhưng IP cloud của Space bị YouTube chặn.\n\n" + msg
+        "Video có thể có English (auto-generated) trên trình duyệt nhưng IP cloud của Space bị YouTube chặn.\n\n"
+        + "\n".join(errors)[-5000:]
     )
 
 
@@ -114,13 +178,11 @@ def load_video(url: str):
     if not vid:
         e = "❌ Hãy nhập URL video YouTube cụ thể."
         return e, {"sentences": [], "index": 0}, "", "🔒 Transcript đang ẩn.", "", 0, e
-
     try:
         sentences, source = fetch_youtube_captions(url)
     except Exception as exc:
         message = f"### 🎬 Video `{vid}`\n\n❌ **Không lấy được English captions.**\n\n{str(exc)[-4500:]}"
         return message, {"sentences": [], "index": 0, "url": url, "id": vid}, "", "🔒 Transcript đang ẩn.", "", 0, message
-
     state = {"sentences": sentences, "index": 0, "url": url, "id": vid}
     first = sentences[0]
     title = f"### 🎬 Video `{vid}`\n\n✅ **{source}** · **{len(sentences)} câu**"
@@ -128,18 +190,20 @@ def load_video(url: str):
 
 
 def playlist_videos(url: str):
-    """Playlist metadata only. Transcript extraction never depends on Invidious."""
-    import subprocess, json
-    cmd = ["yt-dlp", "--flat-playlist", "--dump-single-json", "--skip-download", "--force-ipv4", "--socket-timeout", "20", "--retries", "2", url]
+    """Playlist metadata only. Transcript extraction is independent of Invidious."""
+    cmd = [
+        "yt-dlp", "--flat-playlist", "--dump-single-json", "--skip-download", url,
+        "--force-ipv4", "--socket-timeout", "20", "--retries", "2",
+        "--extractor-args", "youtube:player_client=android",
+    ]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout)[-3500:])
     data = json.loads(p.stdout)
-    result = []
-    for i, e in enumerate(data.get("entries") or [], 1):
-        if e.get("id"):
-            result.append({"title": e.get("title") or f"Video {i}", "id": e["id"], "url": f"https://www.youtube.com/watch?v={e['id']}"})
-    return result
+    return [
+        {"title": e.get("title") or f"Video {i}", "id": e["id"], "url": f"https://www.youtube.com/watch?v={e['id']}"}
+        for i, e in enumerate(data.get("entries") or [], 1) if e.get("id")
+    ]
 
 
 def import_source(url: str):
@@ -149,10 +213,12 @@ def import_source(url: str):
     try:
         videos = playlist_videos(url)
     except Exception as exc:
-        return (*empty_learning(), gr.update(choices=[], value=None), f"❌ Playlist import failed: {exc}")
+        title, state, text, hidden, trans, pos, _ = empty_learning()
+        return title, state, text, hidden, trans, pos, f"❌ Playlist import failed: {exc}", gr.update(choices=[], value=None)
     choices = [(f"{i}. {v['title']}", v["url"]) for i, v in enumerate(videos, 1)]
     if not choices:
-        return (*empty_learning(), gr.update(choices=[], value=None), "❌ Playlist không có video.")
+        title, state, text, hidden, trans, pos, _ = empty_learning()
+        return title, state, text, hidden, trans, pos, "❌ Playlist không có video.", gr.update(choices=[], value=None)
     first_url = choices[0][1]
     title, state, text, hidden, trans, pos, status = load_video(first_url)
     return title, state, text, hidden, trans, pos, f"✅ {len(choices)} video được đưa vào thư viện.", gr.update(choices=choices, value=first_url)
@@ -160,7 +226,8 @@ def import_source(url: str):
 
 def select_video(url: str):
     if not url:
-        return empty_learning()
+        title, state, text, hidden, trans, pos, status = empty_learning()
+        return title, state, text, hidden, trans, pos, status
     return load_video(url)
 
 
