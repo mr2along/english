@@ -1,10 +1,8 @@
-import os
-import re
+import asyncio
 import html
-import json
-import subprocess
-import tempfile
+import re
 from typing import Any
+from urllib.parse import quote
 
 import gradio as gr
 
@@ -14,9 +12,13 @@ DEFAULT_PLAYLIST = "https://youtube.com/playlist?list=PLRDC-DZ_uWhpbeuja5CFDhkVV
 
 def video_id(value: str) -> str | None:
     value = (value or "").strip()
-    m = re.search(r"(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})", value)
-    if m:
-        return m.group(1)
+    patterns = [
+        r"(?:v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/embed/)([A-Za-z0-9_-]{11})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, value)
+        if m:
+            return m.group(1)
     return value if re.fullmatch(r"[A-Za-z0-9_-]{11}", value) else None
 
 
@@ -33,185 +35,208 @@ def youtube_embed(vid: str | None) -> str:
     )
 
 
-def normalize_caption_text(s: str) -> str:
-    s = html.unescape(re.sub(r"<[^>]+>", " ", s or ""))
-    return re.sub(r"\s+", " ", s).strip()
+def clean_line(text: str) -> str:
+    text = html.unescape(text or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-def _ytt_rows(transcript) -> list[dict[str, Any]]:
-    rows = []
-    for item in transcript:
-        if hasattr(item, "text"):
-            rows.append({"text": item.text, "start": item.start, "duration": item.duration})
-        else:
-            rows.append(dict(item))
-    return rows
-
-
-def split_sentences(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out, buf = [], ""
-    start = end = None
-    for item in items:
-        text = normalize_caption_text(str(item.get("text", "")))
-        if not text or text.lower() in {"[music]", "♪"}:
+def split_sentences(text: str) -> list[dict[str, Any]]:
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?…])\s+", text)
+    if len(parts) == 1:
+        words = text.split()
+        parts = [" ".join(words[i:i + 24]) for i in range(0, len(words), 24)]
+    out = []
+    cursor = 0.0
+    for part in parts:
+        part = clean_line(part)
+        if len(part) < 2:
             continue
-        if start is None:
-            start = float(item.get("start", 0))
-        end = float(item.get("start", 0)) + float(item.get("duration", 0))
-        buf = (buf + " " + text).strip()
-        if re.search(r"[.!?…]$", buf) or len(buf.split()) >= 24:
-            out.append({"start": start, "end": end, "text": buf})
-            buf, start = "", None
-    if buf:
-        out.append({"start": start or 0, "end": end or 0, "text": buf})
+        duration = max(2.0, min(12.0, len(part.split()) * 0.48))
+        out.append({"start": cursor, "end": cursor + duration, "text": part})
+        cursor += duration
     return out
 
 
-def _fetch_ytt(vid: str):
-    from youtube_transcript_api import YouTubeTranscriptApi
+async def _tactiq_transcript(url: str) -> tuple[list[dict[str, Any]], str]:
+    from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
-    api = YouTubeTranscriptApi()
-    errors = []
-    try:
-        tracks = list(api.list(vid))
-        generated = [t for t in tracks if getattr(t, "is_generated", False) and str(getattr(t, "language_code", "")).lower().startswith("en")]
-        manual = [t for t in tracks if not getattr(t, "is_generated", False) and str(getattr(t, "language_code", "")).lower().startswith("en")]
-        for track in generated + manual:
+    target = "https://tactiq.io/tools/youtube_transcript?yt=" + quote(url, safe="")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        context = await browser.new_context(
+            locale="en-US",
+            viewport={"width": 1440, "height": 1000},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+        )
+        page = await context.new_page()
+        try:
+            await page.goto(target, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2500)
+
+            # Tactiq has changed button labels over time. Try several labels.
+            labels = [
+                r"get\s+transcript",
+                r"generate\s+transcript",
+                r"transcribe",
+                r"get\s+text",
+                r"generate",
+            ]
+            for label in labels:
+                try:
+                    loc = page.get_by_role("button", name=re.compile(label, re.I))
+                    if await loc.count():
+                        await loc.first.click(timeout=4000)
+                        await page.wait_for_timeout(3000)
+                        break
+                except Exception:
+                    pass
+
+            # Give the client-side application time to finish its request.
             try:
-                rows = _ytt_rows(track.fetch())
-                sentences = split_sentences(rows)
-                if sentences:
-                    kind = "auto-generated" if getattr(track, "is_generated", False) else "manual"
-                    return sentences, f"YouTube English ({kind})"
-            except Exception as exc:
-                errors.append(f"{getattr(track, 'language_code', '?')}: {type(exc).__name__}: {exc}")
-    except Exception as exc:
-        errors.append(f"list: {type(exc).__name__}: {exc}")
+                await page.wait_for_load_state("networkidle", timeout=12000)
+            except PlaywrightTimeoutError:
+                pass
+            await page.wait_for_timeout(2500)
 
-    for langs in (["en"], ["en-US"], ["en-GB"]):
-        try:
-            sentences = split_sentences(_ytt_rows(api.fetch(vid, languages=langs)))
-            if sentences:
-                return sentences, "YouTube English captions"
-        except Exception as exc:
-            errors.append(f"fetch {langs[0]}: {type(exc).__name__}: {exc}")
-    return None, errors
+            # Prefer transcript-specific DOM nodes when available.
+            selectors = [
+                "[data-testid*='transcript']",
+                "[class*='transcript']",
+                "[id*='transcript']",
+                "main",
+            ]
+            candidates: list[str] = []
+            for selector in selectors:
+                try:
+                    texts = await page.locator(selector).all_inner_texts()
+                    candidates.extend(texts)
+                except Exception:
+                    pass
 
+            body = await page.locator("body").inner_text()
+            candidates.append(body)
 
-def _yt_dlp_caption_fallback(vid: str):
-    workdir = tempfile.mkdtemp(prefix="ytcaps-")
-    url = f"https://www.youtube.com/watch?v={vid}"
-    errors = []
-    clients = ["android", "web_safari", "web"]
-    for client in clients:
-        cmd = [
-            "yt-dlp", url, "--skip-download", "--write-auto-subs", "--write-subs",
-            "--sub-langs", "en,en-US,en-GB", "--sub-format", "vtt",
-            "--output", os.path.join(workdir, "caption.%(ext)s"), "--no-playlist",
-            "--force-ipv4", "--socket-timeout", "20", "--retries", "2",
-            "--extractor-args", f"youtube:player_client={client}", "--no-warnings",
-        ]
-        try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-            files = [os.path.join(workdir, x) for x in os.listdir(workdir) if x.endswith(".vtt")]
-            if p.returncode == 0 and files:
-                chosen = next((f for f in files if ".en." in f or ".en-US." in f or ".en-GB." in f), files[0])
-                block_re = re.compile(
-                    r"(?m)^(\d{2}:\d{2}:\d{2}[\.,]\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}[\.,]\d{3}).*?\n(.*?)(?=\n\n|\Z)",
-                    re.S,
+            # Remove navigation/UI noise and choose the text block with the most
+            # sentence-like English content. This makes the integration resilient
+            # to Tactiq CSS/class changes.
+            noise = {
+                "youtube transcript", "youtube transcriber", "copy", "download",
+                "sign in", "log in", "login", "pricing", "blog", "contact",
+                "privacy policy", "terms of service", "cookie policy",
+                "get started", "transcript", "generate transcript",
+            }
+            best = ""
+            best_score = 0
+            for candidate in candidates:
+                lines = [clean_line(x) for x in candidate.splitlines()]
+                lines = [x for x in lines if x and x.lower() not in noise]
+                lines = [x for x in lines if not re.fullmatch(r"[0-9:.,\- ]+", x)]
+                text = " ".join(lines)
+                if len(text) > 20000:
+                    text = text[-20000:]
+                english_words = len(re.findall(r"\b(the|a|an|is|are|to|of|and|you|I|we|it|this|that|for|in)\b", text, re.I))
+                sentence_marks = len(re.findall(r"[.!?]", text))
+                score = english_words * 3 + sentence_marks + min(len(text), 10000) / 1000
+                if score > best_score:
+                    best_score = score
+                    best = text
+
+            # If a Transcript heading exists, extract the following text as a
+            # second-pass heuristic.
+            match = re.search(r"(?is)transcript\s*[:\n]\s*(.{150,})", body)
+            if match:
+                tail = clean_line(match.group(1))
+                if len(tail) > 200:
+                    best = tail[:30000]
+
+            # Strip common Tactiq footer fragments.
+            best = re.split(r"(?i)\b(?:privacy policy|terms of service|cookie policy)\b", best)[0]
+            best = clean_line(best)
+
+            # Avoid returning the application's own UI as a transcript.
+            bad = ["youtube transcript generator", "paste a youtube", "enter a youtube url"]
+            if any(x in best.lower() for x in bad) and len(best) < 1000:
+                best = ""
+
+            sentences = split_sentences(best)
+            if not sentences:
+                raise RuntimeError(
+                    "Tactiq đã mở được nhưng không tìm thấy transcript trong DOM. "
+                    "Có thể giao diện Tactiq đã thay đổi hoặc video không có transcript."
                 )
-                def ts(v):
-                    h, m, s = v.replace(",", ".").split(":")
-                    return int(h) * 3600 + int(m) * 60 + float(s)
-                raw = open(chosen, "r", encoding="utf-8", errors="ignore").read()
-                rows = []
-                for m in block_re.finditer(raw):
-                    text = normalize_caption_text(m.group(3))
-                    if text and text.lower() not in {"♪", "[music]"}:
-                        a, b = ts(m.group(1)), ts(m.group(2))
-                        rows.append({"text": text, "start": a, "duration": max(0.1, b - a)})
-                sentences = split_sentences(rows)
-                if sentences:
-                    return sentences, f"yt-dlp YouTube English ({client})"
-            errors.append(f"{client}: {(p.stderr or p.stdout)[-700:]}")
-        except Exception as exc:
-            errors.append(f"{client}: {type(exc).__name__}: {exc}")
-    raise RuntimeError("; ".join(errors)[-3000:])
+            return sentences, "Tactiq + Playwright"
+        finally:
+            await browser.close()
 
 
-def fetch_youtube_captions(url: str):
-    vid = video_id(url)
-    if not vid:
+def fetch_transcript(url: str):
+    if not video_id(url):
         raise ValueError("Không nhận diện được YouTube video ID.")
-    sentences, errors = _fetch_ytt(vid)
-    if sentences:
-        return sentences, errors
     try:
-        return _yt_dlp_caption_fallback(vid)
-    except Exception as exc:
-        errors.append(f"yt-dlp: {type(exc).__name__}: {exc}")
-    raise RuntimeError(
-        "YouTube có thể đang chặn IP cloud của Hugging Face. "
-        "youtube-transcript-api đã thử English/English auto-generated và yt-dlp fallback.\n\n" + "\n".join(errors)[-4000:]
-    )
+        return asyncio.run(_tactiq_transcript(url))
+    except RuntimeError as exc:
+        # asyncio.run() is normally safe for Gradio worker callbacks. If a host
+        # already has a running event loop, execute the coroutine in a thread.
+        if "cannot be called from a running event loop" not in str(exc):
+            raise
+        import threading
+        result: dict[str, Any] = {}
+        error: list[BaseException] = []
+
+        def runner():
+            try:
+                result["value"] = asyncio.run(_tactiq_transcript(url))
+            except BaseException as e:
+                error.append(e)
+
+        t = threading.Thread(target=runner, daemon=True)
+        t.start(); t.join()
+        if error:
+            raise error[0]
+        return result["value"]
 
 
 def empty_learning():
-    return "🎬 Chọn video để luyện\n\nChưa có bài học.", {"sentences": [], "index": 0, "id": None}, "", "🔒 Transcript đang ẩn.", "", 0, "", youtube_embed(None)
+    return (
+        "🎬 Chọn video để luyện\n\nChưa có bài học.",
+        {"sentences": [], "index": 0, "id": None},
+        "", "🔒 Transcript đang ẩn.", "", 0, "", youtube_embed(None),
+    )
 
 
 def load_video(url: str):
     vid = video_id(url)
     if not vid:
-        return "❌ Hãy nhập URL video YouTube cụ thể.", {"sentences": [], "index": 0, "id": None}, "", "🔒 Transcript đang ẩn.", "", 0, "❌ URL không hợp lệ.", youtube_embed(None)
+        return (
+            "❌ Hãy nhập URL video YouTube cụ thể.",
+            {"sentences": [], "index": 0, "id": None},
+            "", "🔒 Transcript đang ẩn.", "", 0, "❌ URL không hợp lệ.", youtube_embed(None),
+        )
     embed = youtube_embed(vid)
     try:
-        sentences, source = fetch_youtube_captions(url)
+        sentences, source = fetch_transcript(url)
     except Exception as exc:
-        message = f"### 🎬 Video `{vid}`\n\n⚠️ **Video đã được chọn nhưng chưa lấy được transcript.**\n\n{str(exc)[-4000:]}"
+        message = (
+            f"### 🎬 Video `{vid}`\n\n⚠️ **Chưa lấy được transcript qua Tactiq.**\n\n"
+            f"`{type(exc).__name__}: {str(exc)[-3500:]}`"
+        )
         return message, {"sentences": [], "index": 0, "url": url, "id": vid}, "", "🔒 Transcript đang ẩn.", "", 0, message, embed
     state = {"sentences": sentences, "index": 0, "url": url, "id": vid}
     first = sentences[0]
     title = f"### 🎬 Video `{vid}`\n\n✅ **{source}** · **{len(sentences)} câu**"
     return title, state, first["text"], "🔒 Transcript đang ẩn.", "", 0, "", embed
-
-
-def playlist_videos(url: str):
-    cmd = [
-        "yt-dlp", "--flat-playlist", "--dump-single-json", "--skip-download", url,
-        "--force-ipv4", "--socket-timeout", "20", "--retries", "2",
-        "--extractor-args", "youtube:player_client=android",
-    ]
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if p.returncode != 0:
-        raise RuntimeError((p.stderr or p.stdout)[-3000:])
-    data = json.loads(p.stdout)
-    return [
-        {"title": e.get("title") or f"Video {i}", "id": e["id"], "url": f"https://www.youtube.com/watch?v={e['id']}"}
-        for i, e in enumerate(data.get("entries") or [], 1) if e.get("id")
-    ]
-
-
-def import_source(url: str):
-    if video_id(url):
-        result = load_video(url)
-        return (*result, gr.update(choices=[(f"1. {video_id(url)}", url)], value=url))
-    try:
-        videos = playlist_videos(url)
-    except Exception as exc:
-        title, state, text, hidden, trans, pos, _, embed = empty_learning()
-        return title, state, text, hidden, trans, pos, f"❌ Playlist import failed: {exc}", embed, gr.update(choices=[], value=None)
-    choices = [(f"{i}. {v['title']}", v["url"]) for i, v in enumerate(videos, 1)]
-    if not choices:
-        title, state, text, hidden, trans, pos, _, embed = empty_learning()
-        return title, state, text, hidden, trans, pos, "❌ Playlist không có video.", embed, gr.update(choices=[], value=None)
-    first_url = choices[0][1]
-    result = load_video(first_url)
-    return (*result, f"✅ {len(choices)} video được đưa vào thư viện.", result[-1], gr.update(choices=choices, value=first_url))
-
-
-def select_video(url: str):
-    return load_video(url) if url else empty_learning()
 
 
 def choose_sentence(state, index):
@@ -243,7 +268,12 @@ def translate(text):
 def teacher(text):
     if not text:
         return "⚠️ Chưa có câu để phân tích."
-    return f"### 🧑‍🏫 AI Teacher\n**Sentence:** {text}\n\n- Xác định chủ ngữ, động từ và cấu trúc chính.\n- Chú ý trọng âm, nối âm và ngữ điệu.\n- Shadowing 2–3 lần rồi tự đọc lại."
+    return (
+        f"### 🧑‍🏫 AI Teacher\n**Sentence:** {text}\n\n"
+        "- Xác định chủ ngữ, động từ và cấu trúc chính.\n"
+        "- Chú ý trọng âm, nối âm và ngữ điệu.\n"
+        "- Shadowing 2–3 lần rồi tự đọc lại."
+    )
 
 
 CSS = """
@@ -258,7 +288,7 @@ with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft(), css=CSS) as demo:
 
     with gr.Tab("📚 Library"):
         url = gr.Textbox(value=DEFAULT_PLAYLIST, label="YouTube video / playlist URL")
-        import_btn = gr.Button("📥 Import / Load", variant="primary")
+        import_btn = gr.Button("📥 Load YouTube transcript", variant="primary")
         status = gr.Markdown()
         selected = gr.Dropdown(label="🎬 Chọn video để luyện", choices=[], interactive=True)
 
@@ -274,23 +304,34 @@ with gr.Blocks(title=APP_NAME, theme=gr.themes.Soft(), css=CSS) as demo:
         show = gr.Checkbox(label="👁 Hiện câu", value=False)
         translate_btn = gr.Button("🇻🇳 Dịch câu")
         translation = gr.Markdown("")
-        gr.Markdown("### 3️⃣ Shadowing — Đọc theo")
-        audio = gr.Audio(sources=["microphone"], type="filepath", label="🎙 Đọc câu")
+        gr.Markdown("### 🎙 Shadowing — Đọc theo")
+        audio = gr.Audio(sources=["microphone"], type="filepath", label="Đọc câu")
         score_btn = gr.Button("🎯 Chấm phát âm")
         score = gr.Markdown("")
         teacher_btn = gr.Button("🧑‍🏫 Phân tích câu")
         teacher_out = gr.Markdown("")
-        gr.Markdown("### 5️⃣ Quick Quiz")
-        quiz = gr.Markdown("Quiz sẽ xuất hiện sau AI Teacher.")
 
-    import_btn.click(import_source, inputs=url, outputs=[lesson_title, state, sentence, hidden, translation, progress, status, video_frame, selected])
-    selected.change(select_video, inputs=selected, outputs=[lesson_title, state, sentence, hidden, translation, progress, status, video_frame])
-    next_btn.click(next_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress])
-    prev_btn.click(prev_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress])
+    def load_result(url_value):
+        result = load_video(url_value)
+        return result
+
+    import_btn.click(
+        load_result,
+        inputs=url,
+        outputs=[lesson_title, state, sentence, hidden, translation, progress, status, video_frame],
+    )
+    selected.change(
+        load_result,
+        inputs=selected,
+        outputs=[lesson_title, state, sentence, hidden, translation, progress, status, video_frame],
+    )
     show.change(reveal, inputs=[sentence, show], outputs=hidden)
+    prev_btn.click(prev_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress])
+    next_btn.click(next_sentence, inputs=state, outputs=[lesson_title, sentence, hidden, translation, progress])
     translate_btn.click(translate, inputs=sentence, outputs=translation)
     teacher_btn.click(teacher, inputs=sentence, outputs=teacher_out)
-    score_btn.click(lambda: "🎯 Cần microphone khả dụng trên thiết bị để chấm phát âm.", outputs=score)
+    score_btn.click(lambda: "🎧 Chấm phát âm sẽ được nối với Whisper/phoneme scoring ở bước tiếp theo.", outputs=score)
+
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=int(os.getenv("PORT", "7860")), ssr_mode=False)
+    demo.launch(server_name="0.0.0.0", server_port=7860)
