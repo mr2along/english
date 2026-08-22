@@ -4,16 +4,18 @@ import json
 import os
 import re
 from pathlib import Path
+from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlparse
 
 import gradio as gr
 
 APP_TITLE = "English Lab"
 DEFAULT_URL = "https://www.youtube.com/watch?v=vxtvWovNKKE"
-TRANSCRIPT_FILE = Path(__file__).parent / "Transcription" / "playlist_transcripts.json"
+REPO_RAW = "https://raw.githubusercontent.com/mr2along/english/feature/english-lab-v21/Transcription/playlist_transcripts.json"
+LOCAL_FILE = Path(__file__).resolve().parent / "Transcription" / "playlist_transcripts.json"
 
 
-def get_video_id(value: str):
+def get_video_id(value):
     value = (value or "").strip()
     if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
         return value
@@ -30,7 +32,7 @@ def get_video_id(value: str):
         if len(parts) >= 2 and parts[0] in {"embed", "shorts", "live"}:
             return parts[1] if re.fullmatch(r"[A-Za-z0-9_-]{11}", parts[1]) else None
     except Exception:
-        pass
+        return None
     return None
 
 
@@ -47,12 +49,8 @@ def normalize_segments(raw):
             continue
         text = clean_text(item.get("text") or item.get("utf8") or "")
         try:
-            start = float(item.get("start", item.get("startMs", 0)) or 0)
-            duration = float(item.get("duration", item.get("dDurationMs", 0)) or 0)
-            if item.get("startMs") is not None:
-                start /= 1000
-            if item.get("dDurationMs") is not None:
-                duration /= 1000
+            start = float(item.get("start", 0) or 0)
+            duration = float(item.get("duration", 0) or 0)
         except (TypeError, ValueError):
             continue
         if text:
@@ -63,212 +61,182 @@ def normalize_segments(raw):
     return out
 
 
+def validate_library(data):
+    if not isinstance(data, dict) or not isinstance(data.get("videos"), list):
+        raise ValueError("JSON không có trường videos dạng list")
+    videos = []
+    for v in data["videos"]:
+        if not isinstance(v, dict) or not v.get("video_id"):
+            continue
+        item = dict(v)
+        item["video_id"] = str(item["video_id"])
+        item["title"] = clean_text(item.get("title") or item["video_id"])
+        item["transcript"] = normalize_segments(item.get("transcript"))
+        videos.append(item)
+    data["videos"] = videos
+    return data
+
+
 def load_library():
-    if not TRANSCRIPT_FILE.exists():
-        return {"playlist_url": "", "videos": []}
+    errors = []
+    if LOCAL_FILE.exists():
+        try:
+            data = json.loads(LOCAL_FILE.read_text(encoding="utf-8-sig"))
+            return validate_library(data), "local"
+        except Exception as exc:
+            errors.append(f"local: {exc}")
     try:
-        data = json.loads(TRANSCRIPT_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            videos = data.get("videos")
-            data["videos"] = videos if isinstance(videos, list) else []
-            return data
-    except Exception:
-        pass
-    return {"playlist_url": "", "videos": []}
+        req = Request(REPO_RAW, headers={"User-Agent": "EnglishLab/1.0"})
+        with urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8-sig"))
+        return validate_library(data), "github"
+    except Exception as exc:
+        errors.append(f"github: {exc}")
+    return {"playlist_url": "", "videos": []}, "error: " + " | ".join(errors)
 
 
-LIBRARY = load_library()
-VIDEOS = [v for v in LIBRARY.get("videos", []) if isinstance(v, dict) and v.get("video_id")]
+LIBRARY, SOURCE = load_library()
+VIDEOS = LIBRARY.get("videos", [])
 VIDEO_MAP = {v["video_id"]: v for v in VIDEOS}
+TOTAL_SEGMENTS = sum(len(v.get("transcript", [])) for v in VIDEOS)
 
 
-def video_choices():
-    return [
-        (f"{i + 1:03d} · {v.get('title') or v.get('video_id')}", v.get("video_id"))
-        for i, v in enumerate(VIDEOS)
-    ]
+def choices():
+    return [(f"{i+1:03d} · {v['title']}", v["video_id"]) for i, v in enumerate(VIDEOS)]
 
 
-def format_time(seconds):
+def time_text(seconds):
     seconds = max(0, float(seconds or 0))
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-def get_segments(video):
-    return normalize_segments(video.get("transcript") if video else [])
-
-
-def player_html(video_id):
-    v = html.escape(video_id or "", quote=True)
-    if not v:
+def player(video_id):
+    if not video_id:
         return "<div class='empty'>Chưa chọn video.</div>"
-    src = (
-        f"https://www.youtube.com/embed/{v}"
-        "?enablejsapi=1&playsinline=1&rel=0&modestbranding=1"
-        "&origin=https%3A%2F%2Fhuggingface.co"
-    )
-    return f'''<div class="yt-wrap" data-video-id="{v}">
-<div class="yt-frame"><iframe id="englishlab-youtube" src="{src}" title="English Lab YouTube lesson" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe></div>
-<div class="yt-links"><span>🎬 YouTube · {v}</span> · <a href="https://www.youtube.com/watch?v={v}" target="_blank" rel="noopener">Mở YouTube</a></div></div>'''
+    v = html.escape(video_id, quote=True)
+    src = f"https://www.youtube.com/embed/{v}?enablejsapi=1&playsinline=1&rel=0&origin=https%3A%2F%2Fhuggingface.co"
+    return f'''<div class="yt"><div class="frame"><iframe id="englishlab-youtube" src="{src}" title="English Lab YouTube lesson" allow="autoplay; encrypted-media; picture-in-picture; web-share" allowfullscreen></iframe></div><div class="links">🎬 {v} · <a href="https://www.youtube.com/watch?v={v}" target="_blank">Mở YouTube</a></div></div>'''
 
 
-def transcript_html(segments):
-    segments = normalize_segments(segments)
+def transcript(segments):
     if not segments:
-        return '<div class="transcript-panel"><div class="transcript-head"><span>📝 Transcript</span></div><div class="empty">Chưa có transcript cho bài này.</div></div>'
+        return '<div class="panel"><div class="head">📝 Transcript</div><div class="empty">Chưa có transcript.</div></div>'
     rows = []
     for s in segments:
-        start = float(s.get("start", 0))
-        rows.append(
-            f'<button type="button" class="tline" data-start="{start:.3f}">'
-            f'<span class="tstamp">{format_time(start)}</span>'
-            f'<span class="ttext">{html.escape(s.get("text", ""))}</span></button>'
-        )
-    return (
-        '<div class="transcript-panel">'
-        f'<div class="transcript-head"><span>📝 Transcript</span><span class="count">{len(rows)} câu</span></div>'
-        f'<div class="transcript-list">{"".join(rows)}</div></div>'
-    )
+        rows.append(f'<button type="button" class="line" data-start="{s["start"]:.3f}"><span class="stamp">{time_text(s["start"])}</span><span>{html.escape(s["text"])}</span></button>')
+    return f'<div class="panel"><div class="head">📝 Transcript <span>{len(rows):,} câu</span></div><div class="list">{"".join(rows)}</div></div>'
 
 
 def select_video(video_id):
-    video = VIDEO_MAP.get(video_id)
-    if not video:
-        return "❌ Không tìm thấy bài học.", player_html(video_id), transcript_html([]), "[]", ""
-    segs = get_segments(video)
-    title = clean_text(video.get("title") or video_id)
-    lang = video.get("language") or "unknown"
-    pos = video.get("position", "—")
-    status = f"### Bài {pos} · {html.escape(title)}\n`{video_id}` · **{lang}** · **{len(segs):,} câu**"
-    return status, player_html(video_id), transcript_html(segs), json.dumps(segs, ensure_ascii=False, indent=2), video.get("url") or f"https://www.youtube.com/watch?v={video_id}"
+    v = VIDEO_MAP.get(video_id)
+    if not v:
+        return "❌ Không tìm thấy bài học.", player(video_id), transcript([]), "[]", video_id or ""
+    segs = v.get("transcript", [])
+    status = f"### Bài {v.get('position', '—')} · {html.escape(v['title'])}\n`{v['video_id']}` · **{v.get('language','en')}** · **{len(segs):,} câu**"
+    return status, player(v["video_id"]), transcript(segs), json.dumps(segs, ensure_ascii=False, indent=2), v.get("url", "")
 
 
-def select_from_url(url):
-    vid = get_video_id(url)
+def open_url(value):
+    vid = get_video_id(value)
     if not vid:
-        return "❌ URL/Video ID không hợp lệ.", player_html(""), transcript_html([]), "[]", ""
-    if vid in VIDEO_MAP:
-        return select_video(vid)
-    return f"ℹ️ Video `{vid}` chưa có trong thư viện transcript. Bạn có thể mở video, nhưng transcript cần được lấy bằng Termux và cập nhật JSON.", player_html(vid), transcript_html([]), "[]", url
+        return "❌ URL/Video ID không hợp lệ.", player(""), transcript([]), "[]", ""
+    return select_video(vid)
 
 
-def search_library(query):
-    q = (query or "").strip().lower()
-    if not q:
-        choices = video_choices()
-    else:
-        choices = []
-        for i, v in enumerate(VIDEOS):
-            hay = f"{v.get('title','')} {v.get('video_id','')} {v.get('language','')}".lower()
-            if q in hay:
-                choices.append((f"{i + 1:03d} · {v.get('title') or v.get('video_id')}", v.get("video_id")))
-    return gr.update(choices=choices, value=None)
+def search_library(q):
+    q = (q or "").strip().lower()
+    result = choices() if not q else [(f"{i+1:03d} · {v['title']}", v['video_id']) for i, v in enumerate(VIDEOS) if q in f"{v['title']} {v['video_id']} {v.get('language','')}".lower()]
+    return gr.update(choices=result, value=None)
 
 
-def next_video(video_id, step):
+def move(video_id, step):
     ids = [v["video_id"] for v in VIDEOS]
-    if video_id not in ids or not ids:
-        target = ids[0] if ids else None
-    else:
-        idx = ids.index(video_id)
-        target = ids[(idx + int(step)) % len(ids)]
-    if not target:
-        return "", player_html(""), transcript_html([]), "[]", ""
-    return select_video(target)
+    if not ids:
+        return select_video(None)
+    try:
+        i = ids.index(video_id)
+    except ValueError:
+        i = 0
+    return select_video(ids[(i + step) % len(ids)])
 
 
-def manual_import(file_obj, text_value):
-    raw = text_value or ""
+def manual_import(file_obj, text):
+    raw = text or ""
     if file_obj:
-        path = getattr(file_obj, "name", file_obj)
         try:
-            raw = Path(path).read_text(encoding="utf-8-sig")
-        except Exception:
-            return "❌ Không đọc được file.", "[]", transcript_html([])
+            raw = Path(getattr(file_obj, "name", file_obj)).read_text(encoding="utf-8-sig")
+        except Exception as exc:
+            return f"❌ {exc}", "[]", transcript([])
     if not raw.strip():
-        return "⚠️ Chưa có transcript để import.", "[]", transcript_html([])
-    if raw.lstrip().startswith(("{", "[")):
-        try:
+        return "⚠️ Chưa có dữ liệu.", "[]", transcript([])
+    try:
+        if raw.lstrip().startswith(("{", "[")):
             data = json.loads(raw)
             if isinstance(data, dict):
                 data = data.get("transcript") or data.get("segments") or []
             segs = normalize_segments(data)
-            return f"✅ Đã parse {len(segs):,} câu.", json.dumps(segs, ensure_ascii=False, indent=2), transcript_html(segs)
-        except Exception:
-            pass
-    rows = []
-    for line in raw.splitlines():
-        line = line.strip()
-        m = re.match(r"^\[?(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\]?\s*(.*)$", line)
-        if not m:
-            continue
-        p = m.group(1).replace(",", ".").split(":")
-        try:
-            start = float(p[-1]) + float(p[-2]) * 60 + (float(p[-3]) * 3600 if len(p) == 3 else 0)
-        except ValueError:
-            continue
-        text = clean_text(m.group(2))
-        if text:
-            rows.append({"index": len(rows) + 1, "start": start, "duration": 0, "text": text})
-    return f"✅ Đã parse {len(rows):,} câu.", json.dumps(rows, ensure_ascii=False, indent=2), transcript_html(rows)
+        else:
+            segs = []
+            for line in raw.splitlines():
+                m = re.match(r"^\[?(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\]?\s*(.*)$", line.strip())
+                if not m:
+                    continue
+                p = m.group(1).replace(",", ".").split(":")
+                start = float(p[-1]) + float(p[-2])*60 + (float(p[-3])*3600 if len(p)==3 else 0)
+                if m.group(2).strip():
+                    segs.append({"index":len(segs)+1,"start":start,"duration":0,"text":clean_text(m.group(2))})
+        return f"✅ Đã parse {len(segs):,} câu.", json.dumps(segs, ensure_ascii=False, indent=2), transcript(segs)
+    except Exception as exc:
+        return f"❌ Parse lỗi: {exc}", "[]", transcript([])
 
-
-TOTAL_SEGMENTS = sum(len(get_segments(v)) for v in VIDEOS)
-PLAYLIST_URL = LIBRARY.get("playlist_url") or ""
 
 CSS = r'''
-.gradio-container{max-width:1440px!important}.hero{padding:24px;border:1px solid #e2e8f0;border-radius:20px;background:linear-gradient(135deg,#f8fafc,#eef2ff);margin-bottom:16px}.hero h1{margin:0 0 6px;font-size:32px}.muted,.subtle{color:#64748b}.stat-card{padding:14px;border:1px solid #e2e8f0;border-radius:14px;background:var(--body-background-fill);text-align:center}.stat-number{font-size:24px;font-weight:800}.stat-label{font-size:12px;color:#64748b}.yt-wrap,.transcript-panel{font-family:system-ui,sans-serif;border:1px solid #e2e8f0;border-radius:16px;background:var(--body-background-fill);overflow:hidden}.yt-frame{width:100%;aspect-ratio:16/9;background:#000}.yt-frame iframe{width:100%;height:100%;display:block;border:0}.yt-links{padding:10px 14px;font-size:12px;color:#64748b}.yt-links a{color:#2563eb;text-decoration:none}.transcript-head{display:flex;justify-content:space-between;padding:13px 15px;border-bottom:1px solid #e8ebf0;font-weight:700}.count{font-size:12px;color:#64748b;font-weight:500}.transcript-list{max-height:600px;overflow:auto;padding:8px}.tline{display:flex;gap:12px;width:100%;border:0;background:transparent;border-radius:10px;padding:11px 10px;margin:2px 0;text-align:left;cursor:pointer;font-size:14px;line-height:1.5}.tline:hover,.tline.active{background:#eef4ff}.tstamp{min-width:62px;color:#2563eb;font:700 12px ui-monospace,monospace}.ttext{flex:1}.empty{padding:22px;color:#64748b}.lesson-meta{padding:4px 0 10px}.footer-note{font-size:12px;color:#64748b}
+.gradio-container{max-width:1440px!important}.hero{padding:24px;border:1px solid #e2e8f0;border-radius:20px;background:linear-gradient(135deg,#f8fafc,#eef2ff);margin-bottom:16px}.hero h1{margin:0 0 6px;font-size:32px}.muted{color:#64748b}.stats{display:flex;gap:10px}.stat{padding:14px;border:1px solid #e2e8f0;border-radius:14px;text-align:center;flex:1}.num{font-size:24px;font-weight:800}.label{font-size:12px;color:#64748b}.yt,.panel{border:1px solid #e2e8f0;border-radius:16px;overflow:hidden;background:var(--body-background-fill)}.frame{aspect-ratio:16/9;background:#000}.frame iframe{width:100%;height:100%;border:0}.links{padding:10px 14px;font-size:12px;color:#64748b}.links a{color:#2563eb}.head{padding:13px 15px;border-bottom:1px solid #e2e8f0;font-weight:700;display:flex;justify-content:space-between}.list{max-height:580px;overflow:auto;padding:8px}.line{display:flex;gap:12px;width:100%;border:0;background:transparent;border-radius:10px;padding:11px 10px;margin:2px 0;text-align:left;cursor:pointer;line-height:1.5}.line:hover{background:#eef2ff}.stamp{min-width:62px;color:#2563eb;font:700 12px ui-monospace,monospace}.empty{padding:20px;color:#64748b}
 '''
 
-JS = r'''() => {
-  const player=()=>document.getElementById('englishlab-youtube');
-  const send=(func,args=[])=>{const f=player();if(!f?.contentWindow)return;f.contentWindow.postMessage(JSON.stringify({event:'command',func,args}), 'https://www.youtube.com');};
-  const seek=(s)=>{send('seekTo',[Number(s)||0,true]);send('playVideo');};
-  const wire=()=>document.querySelectorAll('.tline').forEach(b=>{if(b.dataset.wired)return;b.dataset.wired='1';b.addEventListener('click',()=>{document.querySelectorAll('.tline.active').forEach(x=>x.classList.remove('active'));b.classList.add('active');seek(b.dataset.start);});});
-  wire();new MutationObserver(wire).observe(document.body,{childList:true,subtree:true});
-}'''
+JS = r'''() => {const f=()=>document.getElementById('englishlab-youtube');const cmd=(fn,args=[])=>{const x=f();if(x?.contentWindow)x.contentWindow.postMessage(JSON.stringify({event:'command',func:fn,args:args}),'*')};const wire=()=>document.querySelectorAll('.line').forEach(b=>{if(b.dataset.wired)return;b.dataset.wired='1';b.onclick=()=>{cmd('seekTo',[Number(b.dataset.start)||0,true]);cmd('playVideo')}});wire();new MutationObserver(wire).observe(document.body,{subtree:true,childList:true});}'''
+
+status_source = f"LOCAL" if SOURCE == "local" else ("GITHUB" if SOURCE == "github" else "ERROR")
+source_note = f"**Library:** `{status_source}` · **{len(VIDEOS)} bài** · **{TOTAL_SEGMENTS:,} câu**"
 
 with gr.Blocks(title=APP_TITLE, css=CSS, js=JS, theme=gr.themes.Soft()) as demo:
-    gr.HTML(f"<div class='hero'><h1>🎧 English Lab</h1><div class='muted'>Luyện nghe · đọc · phát âm · học theo transcript · {len(VIDEOS):,} bài học trong thư viện</div></div>")
+    gr.HTML("<div class='hero'><h1>🎧 English Lab</h1><div class='muted'>Luyện nghe · đọc · phát âm · học theo transcript · thư viện YouTube</div></div>")
+    gr.Markdown(source_note)
     with gr.Row():
-        gr.HTML(f"<div class='stat-card'><div class='stat-number'>{len(VIDEOS):,}</div><div class='stat-label'>Bài học</div></div>")
-        gr.HTML(f"<div class='stat-card'><div class='stat-number'>{TOTAL_SEGMENTS:,}</div><div class='stat-label'>Câu transcript</div></div>")
-        gr.HTML("<div class='stat-card'><div class='stat-number'>LOCAL</div><div class='stat-label'>Nguồn transcript</div></div>")
-
+        gr.HTML(f"<div class='stat'><div class='num'>{len(VIDEOS)}</div><div class='label'>Bài học</div></div>")
+        gr.HTML(f"<div class='stat'><div class='num'>{TOTAL_SEGMENTS:,}</div><div class='label'>Câu transcript</div></div>")
+        gr.HTML(f"<div class='stat'><div class='num'>{status_source}</div><div class='label'>Nguồn dữ liệu</div></div>")
     with gr.Row():
-        search = gr.Textbox(label="🔎 Tìm bài học", placeholder="Tên bài, Video ID, ngôn ngữ...", scale=3)
-        lesson = gr.Dropdown(choices=video_choices(), label="📚 Chọn bài học", scale=5)
-        open_btn = gr.Button("▶ Học bài", variant="primary", scale=1)
-
+        search = gr.Textbox(label="🔎 Tìm bài học", placeholder="Tên bài, Video ID...")
+        lesson = gr.Dropdown(choices=choices(), label="📚 Chọn bài học", scale=2)
+        open_btn = gr.Button("▶ Học bài", variant="primary")
     with gr.Row():
-        prev_btn = gr.Button("← Bài trước", scale=1)
-        next_btn = gr.Button("Bài tiếp →", scale=1)
+        prev_btn = gr.Button("← Bài trước")
+        next_btn = gr.Button("Bài tiếp →")
+    with gr.Row():
         url = gr.Textbox(label="YouTube URL / Video ID", value=DEFAULT_URL, scale=4)
-        url_btn = gr.Button("🎬 Mở video", scale=1)
-
+        url_btn = gr.Button("🎬 Mở video")
     status = gr.Markdown("Chọn một bài học để bắt đầu.")
-    player = gr.HTML(value=player_html(VIDEOS[0].get("video_id") if VIDEOS else get_video_id(DEFAULT_URL)))
-    transcript = gr.HTML(value=transcript_html(VIDEOS[0].get("transcript") if VIDEOS else []))
-    parsed = gr.Code(label="🔬 Dữ liệu transcript", language="json", lines=8)
-
+    initial_id = VIDEOS[0]["video_id"] if VIDEOS else get_video_id(DEFAULT_URL)
+    player_box = gr.HTML(player(initial_id))
+    transcript_box = gr.HTML(transcript(VIDEOS[0].get("transcript", []) if VIDEOS else []))
+    parsed = gr.Code(value="[]", label="🔬 Dữ liệu transcript", language="json", lines=10)
     search.change(search_library, search, lesson)
-    open_btn.click(select_video, lesson, [status, player, transcript, parsed, url])
-    lesson.change(select_video, lesson, [status, player, transcript, parsed, url])
-    url_btn.click(select_from_url, url, [status, player, transcript, parsed, lesson])
-    prev_btn.click(lambda v: next_video(v, -1), lesson, [status, player, transcript, parsed, url])
-    next_btn.click(lambda v: next_video(v, 1), lesson, [status, player, transcript, parsed, url])
-
+    lesson.change(select_video, lesson, [status, player_box, transcript_box, parsed, url])
+    open_btn.click(select_video, lesson, [status, player_box, transcript_box, parsed, url])
+    url_btn.click(open_url, url, [status, player_box, transcript_box, parsed, url])
+    prev_btn.click(lambda x: move(x, -1), lesson, [status, player_box, transcript_box, parsed, url])
+    next_btn.click(lambda x: move(x, 1), lesson, [status, player_box, transcript_box, parsed, url])
     gr.Markdown("### 📥 Import transcript dự phòng")
-    gr.Markdown("<span class='footer-note'>HF Space không tải transcript từ YouTube. Dữ liệu chính nằm trong <b>Transcription/playlist_transcripts.json</b>; Termux dùng để cập nhật thư viện.</span>")
+    gr.Markdown("Transcript chính được lấy từ file playlist đã upload; HF Space không gọi YouTube Transcript API.")
     with gr.Row():
         file = gr.File(label="TXT / SRT / VTT / JSON", file_types=[".txt", ".srt", ".vtt", ".json"], type="filepath")
         text = gr.Textbox(label="Hoặc dán transcript", lines=5)
-    imp = gr.Button("🚀 Import transcript", variant="secondary")
+    imp = gr.Button("🚀 Import transcript")
     import_status = gr.Markdown()
-    imp.click(manual_import, [file, text], [import_status, parsed, transcript])
+    imp.click(manual_import, [file, text], [import_status, parsed, transcript_box])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=int(os.getenv("PORT", "7860")))
