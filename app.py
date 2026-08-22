@@ -29,10 +29,7 @@ def extract_video_id(value):
 
 
 def clean_text(text):
-    noise = {
-        "Copy", "Download", "Share", "Get Video Transcript", "Settings",
-        "SettingsSettings", "Built with Gradio", "Use via API"
-    }
+    noise = {"Copy", "Download", "Share", "Get Video Transcript", "Settings", "SettingsSettings", "Built with Gradio", "Use via API"}
     out, seen = [], set()
     for raw in (text or "").replace("\r", "").splitlines():
         line = re.sub(r"\s+", " ", raw).strip()
@@ -60,11 +57,7 @@ def extract_strings(value, found):
 
 
 def proxy_from_env():
-    # Set TACTIQ_PROXY as a HF Space Secret/variable, e.g.
-    # http://username:password@proxy-host:port
-    # Leave empty to connect directly.
-    value = os.getenv("TACTIQ_PROXY", "").strip()
-    return value or None
+    return os.getenv("TACTIQ_PROXY", "").strip() or None
 
 
 async def get_transcript(video_url):
@@ -76,32 +69,23 @@ async def get_transcript(video_url):
     proxy = proxy_from_env()
 
     async with async_playwright() as p:
-        launch_kwargs = {
-            "headless": True,
-            "args":["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        }
+        launch_kwargs = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]}
         if proxy:
             launch_kwargs["proxy"] = {"server": proxy}
+        try:
+            browser = await p.chromium.launch(**launch_kwargs)
+        except Exception as exc:
+            return f"❌ Chromium chưa được cài trong Space. Hãy chạy `playwright install chromium`. Chi tiết: {exc}"
 
-        browser = await p.chromium.launch(**launch_kwargs)
-        context = await browser.new_context(
-            locale="en-US",
-            viewport={"width": 1440, "height": 1000},
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            ),
-        )
+        context = await browser.new_context(locale="en-US", viewport={"width": 1440, "height": 1000})
         page = await context.new_page()
         network_texts = []
 
         async def capture_response(response):
             try:
                 ct = (response.headers.get("content-type") or "").lower()
-                if "json" not in ct and "text" not in ct and "javascript" not in ct:
-                    return
                 u = response.url.lower()
-                if any(x in u for x in ["transcript", "transcribe", "youtube", "api"]):
+                if ("json" in ct or "text" in ct or "javascript" in ct) and any(x in u for x in ["transcript", "transcribe", "youtube", "api"]):
                     text = await response.text()
                     if text and len(text) >= 80:
                         network_texts.append(text[:2_000_000])
@@ -109,50 +93,32 @@ async def get_transcript(video_url):
                 pass
 
         page.on("response", capture_response)
-
         try:
             response = await page.goto(target, wait_until="domcontentloaded", timeout=60000)
             if response and response.status >= 400:
                 return f"❌ Tactiq HTTP {response.status}: {page.url}"
-
             await page.wait_for_timeout(2500)
 
-            inputs = [
-                page.locator("input[type='url']").first,
-                page.get_by_placeholder(re.compile("YouTube|URL|video", re.I)).first,
-                page.locator("input").first,
-            ]
-            filled = False
-            for loc in inputs:
+            for loc in [page.locator("input[type='url']").first, page.locator("input").first]:
                 try:
                     if await loc.is_visible(timeout=1500):
-                        current = await loc.input_value()
-                        if not current:
+                        if not await loc.input_value():
                             await loc.fill(video_url)
-                        filled = True
                         break
                 except Exception:
                     pass
 
-            if filled:
-                for loc in [
-                    page.get_by_role(
-                        "button",
-                        name=re.compile("Get Video Transcript|Transcript|Generate", re.I),
-                    ).first,
-                    page.locator("button[type='submit']").first,
-                ]:
-                    try:
-                        if await loc.is_visible(timeout=2000):
-                            await loc.click()
-                            break
-                    except Exception:
-                        pass
+            for loc in [page.get_by_role("button", name=re.compile("Get Video Transcript|Transcript|Generate", re.I)).first, page.locator("button[type='submit']").first]:
+                try:
+                    if await loc.is_visible(timeout=2000):
+                        await loc.click()
+                        break
+                except Exception:
+                    pass
 
             best = ""
             for _ in range(45):
                 await page.wait_for_timeout(1000)
-
                 for raw in list(network_texts):
                     try:
                         data = json.loads(raw)
@@ -163,15 +129,7 @@ async def get_transcript(video_url):
                                 best = candidate
                     except Exception:
                         pass
-
-                selectors = [
-                    "[data-testid*='transcript']",
-                    "[class*='transcript']",
-                    "textarea",
-                    "[contenteditable='true']",
-                    "main",
-                ]
-                for selector in selectors:
+                for selector in ["[data-testid*='transcript']", "[class*='transcript']", "textarea", "[contenteditable='true']", "main"]:
                     try:
                         loc = page.locator(selector)
                         for i in range(min(await loc.count(), 10)):
@@ -180,21 +138,13 @@ async def get_transcript(video_url):
                                 best = txt
                     except Exception:
                         pass
-
-                lower = best.lower()
-                if len(best) >= 300 and "use via api" not in lower:
+                if len(best) >= 300 and "use via api" not in best.lower():
                     return best
 
             if len(best) >= 120 and "use via api" not in best.lower():
                 return best
-
             body = clean_text(await page.locator("body").inner_text(timeout=5000))
-            if "something went wrong" in body.lower():
-                return "❌ Tactiq báo lỗi khi xử lý video."
-            return (
-                "❌ Tactiq không trả transcript. Đã mở trang và theo dõi cả DOM + "
-                "network/API nhưng chưa nhận được nội dung transcript."
-            )
+            return "❌ Tactiq không trả transcript sau khi theo dõi DOM + network/API." if body else "❌ Tactiq không phản hồi."
         except PlaywrightTimeoutError as exc:
             return f"❌ Playwright timeout: {exc}"
         except Exception as exc:
@@ -207,29 +157,19 @@ async def get_transcript(video_url):
 
 async def run(url):
     result = await get_transcript(url)
-    if result.startswith("❌"):
-        return "⚠️ Chưa lấy được transcript", result
-    return "✅ Đã lấy transcript", result
+    return ("⚠️ Chưa lấy được transcript", result) if result.startswith("❌") else ("✅ Đã lấy transcript", result)
 
 
 with gr.Blocks(title="English Lab — Tactiq Transcript") as demo:
     gr.Markdown("# 🎧 English Lab — YouTube Transcript")
-    gr.Markdown(
-        "Tactiq + Playwright Async — không dùng yt-dlp, "
-        "youtube-transcript-api hoặc Invidious."
-    )
+    gr.Markdown("Tactiq + Playwright Async — không dùng yt-dlp, youtube-transcript-api hoặc Invidious.")
     with gr.Row():
-        url = gr.Textbox(
-            label="YouTube URL",
-            placeholder="https://www.youtube.com/watch?v=vxtvWovNKKE",
-            scale=5,
-        )
+        url = gr.Textbox(label="YouTube URL", placeholder="https://www.youtube.com/watch?v=vxtvWovNKKE", scale=5)
         button = gr.Button("🚀 Lấy English Transcript", variant="primary", scale=2)
     status = gr.Markdown("Sẵn sàng.")
     output = gr.Textbox(label="Transcript", lines=24, show_copy_button=True)
     button.click(run, inputs=url, outputs=[status, output])
     url.submit(run, inputs=url, outputs=[status, output])
-
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860, ssr_mode=False)
