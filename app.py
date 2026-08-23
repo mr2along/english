@@ -21,9 +21,9 @@ def yt(vid):
     e=html.escape(vid,quote=True)
     return f'<div class="video"><iframe id="ytplayer" src="https://www.youtube.com/embed/{e}?enablejsapi=1&playsinline=1&rel=0" allow="autoplay; encrypted-media; microphone; picture-in-picture" allowfullscreen></iframe></div><div class="video-link">🎬 {e} · <a target="_blank" href="https://www.youtube.com/watch?v={e}">Mở YouTube</a></div>'
 def transcript_html(segs):
-    if not segs:return '<div class="panel"><b>📝 Transcript</b><div class="empty">Chưa có transcript.</div></div>'
+    if not segs:return '<div class="panel"><div class="panel-title">📝 Transcript</div><div class="empty">Chưa có transcript.</div></div>'
     body=''.join(f'<button class="line" data-start="{s["start"]:.3f}"><span class="time">{format_time(s["start"])}</span><span>{html.escape(s["text"])}</span></button>' for s in segs)
-    return f'<div class="panel"><div class="head">📝 Transcript · {len(segs):,} câu</div><div class="lines">{body}</div></div>'
+    return f'<div class="panel"><div class="panel-title"><span>📝 Transcript</span><span class="count">{len(segs):,} câu</span></div><div class="lines">{body}</div></div>'
 def select(vid):
     v=MAP.get(vid)
     if not v:return '❌ Không tìm thấy bài học.',yt(vid),transcript_html([]),'[]',None
@@ -57,30 +57,37 @@ def ai(vid,task):
 def practice(vid):
     v=MAP.get(vid); items=make_practice_items(v.get('transcript',[])) if v else []; return f"### 🎧 Listening / Shadowing\n**{len(items):,} câu luyện tập**\n\nChọn câu trong transcript để phát lại, sau đó dùng mic của trình duyệt để shadowing."
 
-CSS='''.gradio-container{max-width:1450px!important}.hero{padding:24px;border-radius:20px;border:1px solid #e2e8f0;background:linear-gradient(135deg,#f8fafc,#eef2ff)}.hero h1{margin:0;font-size:32px}.muted{color:#64748b}.stat{padding:14px;border:1px solid #e2e8f0;border-radius:14px;text-align:center}.num{font-size:23px;font-weight:800}.label{font-size:12px;color:#64748b}.video{aspect-ratio:16/9;background:#000;border-radius:16px 16px 0 0;overflow:hidden}.video iframe{width:100%;height:100%;border:0}.video-link{padding:9px 14px;border:1px solid #e2e8f0;border-top:0;border-radius:0 0 16px 16px;font-size:12px}.panel{border:1px solid #e2e8f0;border-radius:16px;overflow:hidden}.head{padding:13px;border-bottom:1px solid #e2e8f0;font-weight:700}.lines{max-height:580px;overflow:auto;padding:7px}.line{display:flex;gap:12px;width:100%;border:0;background:transparent;padding:11px;border-radius:10px;text-align:left;cursor:pointer}.line:hover,.line.active{background:#eef2ff}.time{min-width:62px;color:#2563eb;font:700 12px monospace}.empty{padding:20px;color:#64748b}'''
+CSS='''body{background:#f8fafc}.gradio-container{max-width:1480px!important;padding:18px 22px 40px!important}.hero{padding:28px 30px;border-radius:24px;border:1px solid #dbe4f0;background:linear-gradient(135deg,#eef6ff 0%,#f5f3ff 52%,#f8fafc 100%);box-shadow:0 8px 30px rgba(15,23,42,.06);margin-bottom:14px}.hero h1{margin:0;font-size:34px;letter-spacing:-.6px}.hero .sub{margin-top:7px;color:#64748b;font-size:14px}.badge{display:inline-block;margin-top:13px;padding:5px 10px;border-radius:999px;background:#fff;border:1px solid #dbe4f0;color:#475569;font-size:12px;font-weight:700}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:12px 0}.stat{padding:16px;border:1px solid #e2e8f0;border-radius:18px;background:#fff;box-shadow:0 4px 18px rgba(15,23,42,.04)}.num{font-size:24px;font-weight:800;color:#0f172a}.label{font-size:12px;color:#64748b;margin-top:2px}.toolbar{padding:14px;border:1px solid #e2e8f0;border-radius:18px;background:#fff;margin:10px 0}.video{aspect-ratio:16/9;background:#020617;border-radius:18px 18px 0 0;overflow:hidden;box-shadow:0 8px 25px rgba(15,23,42,.12)}.video iframe{width:100%;height:100%;border:0}.video-link{padding:10px 14px;border:1px solid #e2e8f0;border-top:0;border-radius:0 0 18px 18px;background:#fff;color:#64748b;font-size:12px}.video-link a{color:#2563eb;text-decoration:none;font-weight:700}.panel{border:1px solid #e2e8f0;border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 5px 20px rgba(15,23,42,.04)}.panel-title{padding:14px 16px;border-bottom:1px solid #e2e8f0;font-weight:800;display:flex;justify-content:space-between}.count{font-size:12px;color:#64748b;font-weight:600}.lines{max-height:590px;overflow:auto;padding:8px}.line{display:flex;gap:12px;width:100%;border:0;background:transparent;padding:11px 12px;border-radius:12px;text-align:left;cursor:pointer;line-height:1.5;transition:.15s}.line:hover{background:#f1f5f9}.line.active{background:#e0ecff;box-shadow:inset 3px 0 #2563eb}.time{min-width:64px;color:#2563eb;font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace}.empty{padding:24px;color:#64748b;text-align:center}.section-title{font-size:18px;font-weight:800;margin:4px 0 8px}.gradio-tabitem{border-radius:14px}.footer-note{text-align:center;color:#94a3b8;font-size:12px;margin-top:20px}@media(max-width:800px){.gradio-container{padding:10px!important}.hero{padding:20px}.hero h1{font-size:27px}.stats{grid-template-columns:1fr}.lines{max-height:460px}.line{padding:10px 8px}.time{min-width:55px}}'''
 JS=r'''() => {const cmd=(f,a=[])=>{const x=document.getElementById('ytplayer');if(x?.contentWindow)x.contentWindow.postMessage(JSON.stringify({event:'command',func:f,args:a}),'*')};const wire=()=>document.querySelectorAll('.line').forEach(b=>{if(b.dataset.wired)return;b.dataset.wired=1;b.onclick=()=>{document.querySelectorAll('.line.active').forEach(x=>x.classList.remove('active'));b.classList.add('active');cmd('seekTo',[+b.dataset.start,true]);cmd('playVideo')}});wire();new MutationObserver(wire).observe(document.body,{subtree:true,childList:true});window.EL={play:()=>cmd('playVideo'),pause:()=>cmd('pauseVideo'),back:()=>cmd('seekTo',[0,true]),speed:r=>cmd('setPlaybackRate',[+r])}}'''
 
-with gr.Blocks(title='English Learning Lab V2.2',css=CSS,js=JS,theme=gr.themes.Soft()) as demo:
-    gr.HTML("<div class='hero'><h1>🎧 English Learning Lab V2.2</h1><div class='muted'>Listening · Reading · Shadowing · Pronunciation · Grammar · Vocabulary · Quiz · Spaced Repetition</div></div>")
-    gr.Markdown(f"**📦 Library:** `{SOURCE.upper()}` · **{len(VIDEOS)} bài** · **{TOTAL:,} câu**"+(f" · ⚠️ {ERROR}" if ERROR else ''))
-    with gr.Row():
-        for n,label in [(len(VIDEOS),'Bài học'),(TOTAL,'Câu transcript'),(len(PROGRESS.data['lessons']),'Đã học')]: gr.HTML(f"<div class='stat'><div class='num'>{n:,}</div><div class='label'>{label}</div></div>")
-    with gr.Row():
-        search_box=gr.Textbox(label='🔎 Tìm bài học',placeholder='Tên bài hoặc Video ID'); lesson=gr.Dropdown(choices=choices(),label='📚 Lesson',scale=2); open_btn=gr.Button('▶ Học bài',variant='primary')
-    with gr.Row(): prev=gr.Button('← Bài trước'); nxt=gr.Button('Bài tiếp →')
+with gr.Blocks(title='English Learning Lab V2.3',css=CSS,js=JS,theme=gr.themes.Soft()) as demo:
+    gr.HTML(f"<div class='hero'><h1>🎧 English Learning Lab</h1><div class='sub'>Listening · Reading · Shadowing · Pronunciation · Grammar · Vocabulary · Quiz · Spaced Repetition</div><span class='badge'>V2.3 · {len(VIDEOS)} lessons · {TOTAL:,} transcript segments</span></div>")
+    with gr.Row(elem_classes='stats'):
+        gr.HTML(f"<div class='stat'><div class='num'>{len(VIDEOS):,}</div><div class='label'>📚 Bài học</div></div>")
+        gr.HTML(f"<div class='stat'><div class='num'>{TOTAL:,}</div><div class='label'>📝 Câu transcript</div></div>")
+        gr.HTML(f"<div class='stat'><div class='num'>{len(PROGRESS.data['lessons']):,}</div><div class='label'>📈 Đã học</div></div>")
+    gr.Markdown(f"**📦 Library:** `{SOURCE.upper()}`"+(f" · ⚠️ {ERROR}" if ERROR else ' · Dữ liệu sẵn sàng'))
+    with gr.Row(elem_classes='toolbar'):
+        search_box=gr.Textbox(label='🔎 Tìm bài học',placeholder='Tên bài hoặc Video ID',scale=2); lesson=gr.Dropdown(choices=choices(),label='📚 Chọn bài học',scale=3); open_btn=gr.Button('▶ Học bài',variant='primary')
+    with gr.Row(): prev=gr.Button('← Bài trước'); nxt=gr.Button('Bài tiếp →'); show=gr.Checkbox(value=True,label='👁️ Hiện transcript')
     with gr.Row(): url=gr.Textbox(label='YouTube URL / Video ID',value=f'https://www.youtube.com/watch?v={DEFAULT}',scale=4); url_btn=gr.Button('🎬 Mở video')
-    status=gr.Markdown('Chọn bài học để bắt đầu.'); player=gr.HTML(yt(DEFAULT)); trans=gr.HTML(transcript_html(MAP.get(DEFAULT,{}).get('transcript',[]))); parsed=gr.Code(to_json(MAP.get(DEFAULT,{}).get('transcript',[])),language='json',label='🔬 Transcript JSON',lines=8)
-    with gr.Row(): play=gr.Button('▶ Phát'); pause=gr.Button('⏸ Dừng'); back=gr.Button('↺ Về đầu'); speed=gr.Dropdown([0.5,0.75,1,1.25,1.5],value=1,label='Tốc độ')
-    show=gr.Checkbox(value=True,label='👁️ Hiện transcript')
-    with gr.Tab('🎧 Listening / Shadowing'): practice_out=gr.Markdown(); practice_btn=gr.Button('🚀 Chuẩn bị luyện tập')
-    with gr.Tab('🎤 Pronunciation'): gr.Markdown('**Browser microphone:** dùng mic để shadowing; bước scoring sẽ dùng Speech Recognition khi trình duyệt hỗ trợ.')
-    with gr.Tab('🤖 AI Tutor'):
-        with gr.Row(): grammar_btn=gr.Button('📖 Grammar'); vocab_btn=gr.Button('📚 Vocabulary')
-        ai_out=gr.Markdown()
-    with gr.Tab('🧠 Quiz'): quiz_btn=gr.Button('Tạo Quiz'); quiz_out=gr.Markdown()
+    status=gr.Markdown('Chọn bài học để bắt đầu.');
+    with gr.Row():
+        with gr.Column(scale=7): player=gr.HTML(yt(DEFAULT))
+        with gr.Column(scale=5): trans=gr.HTML(transcript_html(MAP.get(DEFAULT,{}).get('transcript',[])))
+    with gr.Row(): play=gr.Button('▶ Phát'); pause=gr.Button('⏸ Dừng'); back=gr.Button('↺ Về đầu'); speed=gr.Dropdown([0.5,0.75,1,1.25,1.5],value=1,label='⚡ Tốc độ')
+    with gr.Tabs():
+        with gr.Tab('🎧 Listening / Shadowing'): practice_out=gr.Markdown(); practice_btn=gr.Button('🚀 Chuẩn bị luyện tập',variant='primary')
+        with gr.Tab('🎤 Pronunciation'): gr.Markdown('**🎙️ Microphone**\n\nDùng mic của trình duyệt để luyện shadowing. Hệ thống sẽ bổ sung scoring phát âm ở phiên bản tiếp theo.')
+        with gr.Tab('🤖 AI Tutor'):
+            with gr.Row(): grammar_btn=gr.Button('📖 Grammar'); vocab_btn=gr.Button('📚 Vocabulary')
+            ai_out=gr.Markdown('Chọn một bài rồi yêu cầu AI phân tích câu học.')
+        with gr.Tab('🧠 Quiz'): quiz_btn=gr.Button('🎯 Tạo Quiz',variant='primary'); quiz_out=gr.Markdown()
+        with gr.Tab('📦 Data'): parsed=gr.Code(to_json(MAP.get(DEFAULT,{}).get('transcript',[])),language='json',label='Transcript JSON',lines=10)
     gr.Markdown('### 📥 Import transcript dự phòng')
     with gr.Row(): file=gr.File(file_types=['.txt','.srt','.vtt','.json'],type='filepath',label='TXT / SRT / VTT / JSON'); text=gr.Textbox(label='Hoặc dán transcript',lines=4)
     imp=gr.Button('🚀 Import transcript'); imp_status=gr.Markdown()
+    gr.HTML("<div class='footer-note'>English Learning Lab · YouTube chỉ phát trên trình duyệt · HF Space không tải transcript trực tiếp từ YouTube</div>")
     search_box.change(search,search_box,lesson); lesson.change(select,lesson,[status,player,trans,parsed,url]); open_btn.click(select,lesson,[status,player,trans,parsed,url]); url_btn.click(open_url,url,[status,player,trans,parsed,url]); prev.click(lambda x:move(x,-1),lesson,lesson).then(select,lesson,[status,player,trans,parsed,url]); nxt.click(lambda x:move(x,1),lesson,lesson).then(select,lesson,[status,player,trans,parsed,url]); show.change(lambda s,vid: transcript_html(MAP.get(vid,{}).get('transcript',[])) if s else '<div class="panel"><div class="empty">Transcript đang ẩn.</div></div>',[show,lesson],trans); practice_btn.click(practice,lesson,practice_out); grammar_btn.click(lambda x:ai(x,'grammar'),lesson,ai_out); vocab_btn.click(lambda x:ai(x,'vocab'),lesson,ai_out); quiz_btn.click(quiz,lesson,quiz_out); imp.click(import_transcript,[file,text],[imp_status,parsed,trans]); play.click(None,js='() => window.EL?.play()'); pause.click(None,js='() => window.EL?.pause()'); back.click(None,js='() => window.EL?.back()'); speed.change(None,js='r => window.EL?.speed(r)')
 
 if __name__=='__main__': demo.launch(server_name='0.0.0.0',server_port=int(os.getenv('PORT','7860')))
