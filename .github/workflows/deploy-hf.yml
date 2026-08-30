@@ -1,4 +1,4 @@
-name: Deploy to Hugging Face Space
+name: Deploy English Lab V21 to Hugging Face
 
 on:
   push:
@@ -6,33 +6,69 @@ on:
       - feature/english-lab-v21
   workflow_dispatch:
 
+# Required by Hugging Face Trusted Publishers.
+# No HF_TOKEN secret is needed.
 permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: english-lab-v21-hf-deploy
+  cancel-in-progress: true
+
 jobs:
   deploy:
+    name: Deploy to Hugging Face Space
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           lfs: true
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Validate Python application
+        run: |
+          python -m py_compile app.py
+          python -m compileall -q core
+          echo "✅ Python validation passed"
 
       - name: Install Hugging Face CLI
         run: |
           curl -LsSf https://hf.co/cli/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Validate application
-        run: python -m py_compile app.py
+      - name: Verify Hugging Face CLI
+        run: |
+          hf --version
 
       - name: Deploy with Hugging Face Trusted Publisher
         env:
+          # Must exactly match the HF Trusted Publisher resource.
           HF_OIDC_RESOURCE: spaces/Mrlongpro/autosubs
         run: |
           hf upload Mrlongpro/autosubs . \
             --repo-type space \
-            --exclude=".git*" \
-            --exclude=".github*" \
-            --commit-message="Deploy Tactiq Playwright from V21 ${GITHUB_SHA::7}"
+            --exclude=".git/*" \
+            --exclude=".github/*" \
+            --exclude="__pycache__/*" \
+            --exclude="*.pyc" \
+            --commit-message="Deploy English Lab V21 ${GITHUB_SHA::7}"
+
+      - name: Deployment summary
+        run: |
+          echo "=============================================="
+          echo "✅ ENGLISH LAB V21 DEPLOYED"
+          echo "=============================================="
+          echo "GitHub : $GITHUB_REPOSITORY"
+          echo "Branch : $GITHUB_REF_NAME"
+          echo "Commit : ${GITHUB_SHA::7}"
+          echo "HF     : Mrlongpro/autosubs"
+          echo "=============================================="
