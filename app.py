@@ -79,10 +79,22 @@ def vocab(vid):
     return vocabulary_request(text)['prompt'] if text else 'Chưa có câu để phân tích.'
 def quiz(vid):
     v=MAP.get(vid)
-    if not v:return 'Chưa có dữ liệu quiz.'
-    q=make_quiz(v.get('transcript',[]))
-    if not q:return 'Bài này chưa có transcript để tạo quiz.'
-    return f"### 🧠 Mini Quiz\n**{q['question']}**\n\n<details><summary>Hiện đáp án</summary>{html.escape(q['answer'])}</details>" if q['type']=='fill_blank' else f"### 🧠 Repeat\n{html.escape(q['answer'])}"
+    if not v:return 'Chưa có dữ liệu quiz.','','',''
+    segs=v.get('transcript',[])
+    if not segs:return 'Bài này chưa có transcript để tạo quiz.','','',''
+    index=max(range(len(segs)),key=lambda i:len(str(segs[i].get('text','')).split()))
+    q=make_quiz(segs,index)
+    if not q:return 'Bài này chưa có transcript để tạo quiz.','','',''
+    if q['type']=='fill_blank':
+        question=f"### 🧠 Điền từ còn thiếu\n\n**{q['question']}**\n\nNhập từ hoặc cụm từ còn thiếu rồi bấm **Kiểm tra đáp án**."
+    else:
+        question="### 🧠 Gõ lại câu\n\nNghe câu đang chọn trong transcript, nhập lại toàn bộ câu rồi bấm **Kiểm tra đáp án**."
+    return question,q['answer'],'',''
+def check_quiz(answer,expected):
+    if not expected:return 'Hãy bấm **Tạo Quiz** trước.'
+    normalize=lambda text:re.sub(r'[^a-z0-9]+','',str(text or '').casefold())
+    if normalize(answer)==normalize(expected):return '✅ Chính xác!'
+    return f"❌ Chưa đúng. Đáp án: **{html.escape(str(expected))}**"
 def sr(vid,score):
     if not vid:return 'Chưa chọn bài.'
     b=spaced_repetition_box(score); p=PROGRESS.lesson(vid); p['score']=b['score']; p['next_review_days']=b['interval_days']; PROGRESS.save(); return f"### 🔁 Spaced Repetition\nĐiểm **{b['score']}/5** → ôn lại sau **{b['interval_days']} ngày**."
@@ -126,7 +138,7 @@ const checkEnd=ended=>{if(!active||i<0||(!ended&&call('getPlayerState')!==1))ret
 const go=k=>{if(!n.length)return;i=Math.max(0,Math.min(k,n.length-1));n.forEach(x=>x.classList.remove('active'));let b=n[i];b.classList.add('active');b.scrollIntoView({behavior:'smooth',block:'center'});repeatsLeft=Math.max(0,repeatCount-1);active=true;call('seekTo',+b.dataset.start,true);call('playVideo')};
 const repeat=()=>{if(i<0){go(0);return}go(i)};
 wire();loadApi();new MutationObserver(()=>{wire();loadApi()}).observe(document.body,{subtree:true,childList:true});setInterval(()=>checkEnd(false),100);
-window.EL={play:()=>call('playVideo'),pause:()=>call('pauseVideo'),back:()=>{clear();repeatsLeft=0;call('seekTo',0,true)},speed:r=>call('setPlaybackRate',+r||1),prevSentence:()=>go(i<0?n.length-1:i-1),nextSentence:()=>go(i<0?0:i+1),repeat,setRepeatCount:v=>{let selected=(v==='infinite'||v==='∞')?'∞':Math.max(1,parseInt(v,10)||1);repeatCount=selected==='∞'?999999:selected;if(active)repeatsLeft=Math.max(0,repeatCount-1);document.querySelectorAll('.repeat-choice').forEach((el,k)=>el.classList.toggle('selected',['1','2','3','5','∞'][k]===String(selected)))}};
+window.EL={play:()=>call('playVideo'),playSentence:v=>{let k=parseInt(v,10);return go(Number.isFinite(k)?k:0)},pause:()=>call('pauseVideo'),back:()=>{clear();repeatsLeft=0;call('seekTo',0,true)},speed:r=>call('setPlaybackRate',+r||1),prevSentence:()=>go(i<0?n.length-1:i-1),nextSentence:()=>go(i<0?0:i+1),repeat,setRepeatCount:v=>{let selected=(v==='infinite'||v==='∞')?'∞':Math.max(1,parseInt(v,10)||1);repeatCount=selected==='∞'?999999:selected;if(active)repeatsLeft=Math.max(0,repeatCount-1);document.querySelectorAll('.repeat-choice').forEach((el,k)=>el.classList.toggle('selected',['1','2','3','5','∞'][k]===String(selected)))}};
 window.EL.setRepeatCount(1);
 }'''
 
@@ -150,13 +162,14 @@ with gr.Blocks(title='English Learning Lab V3',css=CSS,js=JS,theme=gr.themes.Sof
         gr.Markdown('Chọn câu trong transcript rồi bấm **🔁 Lặp câu**. Mỗi lần lặp giữ nguyên timestamp của câu.',elem_classes='repeat-label')
     with gr.Tabs():
         with gr.Tab('🎧 Listening / Shadowing'):
-            practice_out=gr.Markdown(); practice_btn=gr.Button('🚀 Chuẩn bị luyện tập',variant='primary'); sentence_no=gr.Number(value=0,precision=0,label='Số câu (0 = câu đầu)'); mark_btn=gr.Button('✅ Đánh dấu câu đã luyện'); mark_out=gr.Markdown()
+            practice_out=gr.Markdown(); practice_btn=gr.Button('🚀 Chuẩn bị luyện tập',variant='primary'); sentence_no=gr.Number(value=0,precision=0,label='Số câu (0 = câu đầu)'); practice_play=gr.Button('▶ Phát câu đang chọn'); mark_btn=gr.Button('✅ Đánh dấu câu đã luyện'); mark_out=gr.Markdown()
         with gr.Tab('🎤 Text Match'):
             target=gr.Textbox(label='Câu mẫu',lines=2); spoken=gr.Textbox(label='Câu bạn đọc / Speech-to-text',lines=2); pron_btn=gr.Button('🎯 Chấm độ khớp',variant='primary'); pron_out=gr.Markdown(); gr.Markdown('Dùng mic/Speech-to-text của trình duyệt rồi chấm độ khớp từ. Không giả lập điểm chất lượng âm thanh.')
         with gr.Tab('🤖 AI Tutor · Prompt'):
             with gr.Row():grammar_btn=gr.Button('📖 Grammar'); vocab_btn=gr.Button('📚 Vocabulary')
             ai_out=gr.Markdown('Chọn bài rồi yêu cầu AI phân tích.')
-        with gr.Tab('🧠 Quiz'):quiz_btn=gr.Button('🎯 Tạo Quiz',variant='primary'); quiz_out=gr.Markdown()
+        with gr.Tab('🧠 Quiz'):
+            quiz_state=gr.State(''); quiz_btn=gr.Button('🎯 Tạo Quiz',variant='primary'); quiz_out=gr.Markdown(); quiz_answer=gr.Textbox(label='Câu trả lời',placeholder='Nhập từ/cụm từ còn thiếu…',interactive=True); quiz_check=gr.Button('✅ Kiểm tra đáp án'); quiz_feedback=gr.Markdown()
         with gr.Tab('🔁 Spaced Repetition'):sr_score=gr.Slider(0,5,value=3,step=1,label='Mức nhớ 0–5'); sr_btn=gr.Button('📅 Lập lịch ôn',variant='primary'); sr_out=gr.Markdown()
         with gr.Tab('📦 Data'):parsed=gr.Code(to_json(MAP.get(DEFAULT,{}).get('transcript',[])),language='json',label='Final Transcript JSON',lines=12)
     gr.Markdown('### 📥 Import transcript dự phòng')
@@ -170,11 +183,13 @@ with gr.Blocks(title='English Learning Lab V3',css=CSS,js=JS,theme=gr.themes.Sof
     nxt.click(lambda x:move(x,1),lesson,lesson).then(select,lesson,[status,player,trans,parsed,lesson,url])
     show.change(lambda s,vid:transcript_html(MAP.get(vid,{}).get('transcript',[])) if s else '<div class="panel"><div class="empty">Script đang ẩn.</div></div>',[show,lesson],trans)
     practice_btn.click(practice,lesson,practice_out)
+    practice_play.click(None,sentence_no,js='n => {window.EL?.playSentence(n); return []}')
     sentence_no.change(sentence_for,[lesson,sentence_no],target)
     mark_btn.click(mark_sentence,[lesson,sentence_no],[mark_out,status])
     grammar_btn.click(grammar,lesson,ai_out)
     vocab_btn.click(vocab,lesson,ai_out)
-    quiz_btn.click(quiz,lesson,quiz_out)
+    quiz_btn.click(quiz,lesson,[quiz_out,quiz_state,quiz_answer,quiz_feedback])
+    quiz_check.click(check_quiz,[quiz_answer,quiz_state],quiz_feedback)
     sr_btn.click(sr,[lesson,sr_score],sr_out)
     pron_btn.click(pron_score,[target,spoken],pron_out)
     imp.click(import_transcript,[file,text],[imp_status,parsed,trans])
