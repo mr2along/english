@@ -24,18 +24,26 @@ def yt(vid):
     return f'<div class="video"><iframe id="ytplayer" src="https://www.youtube.com/embed/{e}?enablejsapi=1&playsinline=1&rel=0" allow="autoplay; encrypted-media; microphone; picture-in-picture" allowfullscreen></iframe></div><div class="video-link">🎬 {e} · <a target="_blank" href="https://www.youtube.com/watch?v={e}">Mở YouTube</a></div>'
 def transcript_html(segs):
     if not segs:return '<div class="panel"><div class="panel-title">📝 Transcript</div><div class="empty">Chưa có transcript.</div></div>'
-    body=''.join(f'<button class="line" data-index="{i}" data-start="{float(s.get("start",0)):.3f}" data-end="{float(s.get("end",s.get("start",0))):.3f}"><span class="time">{format_time(float(s.get("start",0)))}</span><span>{html.escape(str(s.get("text","")))}</span></button>' for i,s in enumerate(segs))
+    body=''.join(f'<button class="line" data-index="{i}" data-start="{float(s.get("start",0)):.3f}" data-end="{float(s.get("end",float(s.get("start",0))+float(s.get("duration",0)))):.3f}"><span class="time">{format_time(float(s.get("start",0)))}</span><span>{html.escape(str(s.get("text","")))}</span></button>' for i,s in enumerate(segs))
     return f'<div class="panel"><div class="panel-title"><span>📝 Transcript</span><span class="count">{len(segs):,} câu</span></div><div class="lines">{body}</div></div>'
+def lesson_status(vid):
+    v=MAP.get(vid)
+    if not v:return 'Chưa chọn bài học.'
+    seg=v.get('transcript',[]); p=PROGRESS.lesson(vid)
+    done=sum(bool(x) for x in p.get('sentences',{}).values()); pct=round(done/len(seg)*100) if seg else 0
+    raw=len(v.get('raw_transcript',seg)); source=v.get('transcript_source','final_transcript'); align=v.get('alignment','final_alignment')
+    return f"### 🎯 {v.get('position','')} · {html.escape(v.get('title',vid))}\n`{vid}` · {v.get('language','en')} · **{len(seg):,} câu** · **{pct}% đã luyện**\n\n📦 Source: `{source}` · 🔗 Alignment: `{align}` · Raw: {raw:,}"
+
 def select(vid):
     v=MAP.get(vid)
-    if not v:return '❌ Không tìm thấy bài học.',yt(vid),transcript_html([]),'[]',None
+    if not v:return '❌ Không tìm thấy bài học.',yt(''),transcript_html([]),'[]',None,''
     seg=v.get('transcript',[]); p=PROGRESS.lesson(vid); done=sum(bool(x) for x in p.get('sentences',{}).values()); pct=round(done/len(seg)*100) if seg else 0; PROGRESS.mark_view(vid)
     raw=len(v.get('raw_transcript',seg)); source=v.get('transcript_source','final_transcript'); align=v.get('alignment','final_alignment')
     st=f"### 🎯 {v.get('position','')} · {html.escape(v.get('title',vid))}\n`{vid}` · {v.get('language','en')} · **{len(seg):,} câu** · **{pct}% đã luyện**\n\n📦 Source: `{source}` · 🔗 Alignment: `{align}` · Raw: `{raw:,}`"
-    return st,yt(vid),transcript_html(seg),to_json(seg),vid
+    return st,yt(vid),transcript_html(seg),to_json(seg),vid,f'https://www.youtube.com/watch?v={vid}'
 
 def open_url(value):
-    vid=video_id(value); return select(vid) if vid else ('❌ URL/Video ID không hợp lệ.',yt(''),transcript_html([]),'[]',None)
+    vid=video_id(value); return select(vid) if vid else ('❌ URL/Video ID không hợp lệ.',yt(''),transcript_html([]),'[]',None,value or '')
 def search(q):
     q=(q or '').lower().strip(); c=choices() if not q else [(f"{i+1:03d} · {v.get('title',v['video_id'])}",v['video_id']) for i,v in enumerate(VIDEOS) if q in f"{v.get('title','')} {v['video_id']}".lower()]; return gr.update(choices=c,value=(c[0][1] if len(c)==1 else None))
 def move(vid,d):
@@ -51,10 +59,14 @@ def sentence_for(vid,index):
     except Exception:i=0
     return seg[i].get('text','')
 def mark_sentence(vid,index):
-    if not vid:return 'Chưa chọn bài.'
+    if not vid:return 'Chưa chọn bài.','Chưa chọn bài học.'
     try:i=max(0,int(index))
     except Exception:i=0
-    p=PROGRESS.lesson(vid); p['sentences'][str(i)]=True; PROGRESS.save(); return f'✅ Đã đánh dấu câu {i+1}.'
+    seg=MAP.get(vid,{}).get('transcript',[])
+    if not seg:return 'Bài này chưa có transcript.',lesson_status(vid)
+    if i>=len(seg):return f'❌ Số câu phải nằm trong khoảng 0–{len(seg)-1}.',lesson_status(vid)
+    p=PROGRESS.lesson(vid); p['sentences'][str(i)]=True; PROGRESS.save()
+    return f'✅ Đã đánh dấu câu {i+1}.',lesson_status(vid)
 def practice(vid):
     v=MAP.get(vid)
     if not v:return 'Chưa chọn bài.'
@@ -69,6 +81,7 @@ def quiz(vid):
     v=MAP.get(vid)
     if not v:return 'Chưa có dữ liệu quiz.'
     q=make_quiz(v.get('transcript',[]))
+    if not q:return 'Bài này chưa có transcript để tạo quiz.'
     return f"### 🧠 Mini Quiz\n**{q['question']}**\n\n<details><summary>Hiện đáp án</summary>{html.escape(q['answer'])}</details>" if q['type']=='fill_blank' else f"### 🧠 Repeat\n{html.escape(q['answer'])}"
 def sr(vid,score):
     if not vid:return 'Chưa chọn bài.'
@@ -77,17 +90,20 @@ def pron_score(target,spoken):
     a=re.sub(r"[^a-z0-9' ]",'',(target or '').lower()).split(); b=re.sub(r"[^a-z0-9' ]",'',(spoken or '').lower()).split()
     if not a:return 'Chưa có câu mẫu.'
     score=round(difflib.SequenceMatcher(None,a,b).ratio()*100); missing=[w for w in a if w not in b][:10]
-    return f"### 🎤 Pronunciation\n# {score}%\n\nSo khớp từ: **{len(a)} mẫu / {len(b)} đọc**\n\n{'Từ cần luyện: `'+', '.join(missing)+'`' if missing else '🎉 Câu đọc rất gần câu mẫu.'}"
+    return f"### 🎤 Độ khớp văn bản\n# {score}%\n\nSo khớp từ: **{len(a)} mẫu / {len(b)} đọc**\n\n{'Từ cần luyện: `'+', '.join(missing)+'`' if missing else '🎉 Câu đọc rất gần câu mẫu.'}"
 def import_transcript(file,text):
     raw=text or ''
     if file:
         try:raw=Path(getattr(file,'name',file)).read_text(encoding='utf-8-sig')
         except Exception as e:return f'❌ {e}','[]',transcript_html([])
-    try:seg=parse_manual(raw); return f'✅ {len(seg):,} câu',to_json(seg),transcript_html(seg)
+    try:
+        seg=parse_manual(raw)
+        if not seg:return '❌ Không tìm thấy câu có timestamp trong transcript.','[]',transcript_html([])
+        return f'✅ Preview: {len(seg):,} câu (chưa thay transcript bài đang học).',to_json(seg),transcript_html(seg)
     except Exception as e:return f'❌ Parse lỗi: {e}','[]',transcript_html([])
 
 CSS='''body{background:#f8fafc}.gradio-container{max-width:1480px!important;padding:18px 22px 40px!important}.hero{padding:28px 30px;border-radius:24px;border:1px solid #dbe4f0;background:linear-gradient(135deg,#eef6ff,#f5f3ff,#f8fafc);box-shadow:0 8px 30px rgba(15,23,42,.06);margin-bottom:14px}.hero h1{margin:0;font-size:34px}.hero .sub{margin-top:7px;color:#64748b;font-size:14px}.badge{display:inline-block;margin-top:13px;padding:5px 10px;border-radius:999px;background:#fff;border:1px solid #dbe4f0;color:#475569;font-size:12px;font-weight:700}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:12px 0}.stat{padding:16px;border:1px solid #e2e8f0;border-radius:18px;background:#fff}.num{font-size:24px;font-weight:800}.label{font-size:12px;color:#64748b}.toolbar{padding:14px;border:1px solid #e2e8f0;border-radius:18px;background:#fff;margin:10px 0}.video{aspect-ratio:16/9;background:#020617;border-radius:18px 18px 0 0;overflow:hidden}.video iframe{width:100%;height:100%;border:0}.video-link{padding:10px 14px;border:1px solid #e2e8f0;background:#fff;color:#64748b;font-size:12px}.video-link a{color:#2563eb;font-weight:700}.panel{border:1px solid #e2e8f0;border-radius:18px;background:#fff;overflow:hidden}.panel-title{padding:14px 16px;border-bottom:1px solid #e2e8f0;font-weight:800;display:flex;justify-content:space-between}.count{font-size:12px;color:#64748b}.lines{max-height:590px;overflow:auto;padding:8px}.line{display:flex;gap:12px;width:100%;border:0;background:transparent;padding:11px 12px;border-radius:12px;text-align:left;cursor:pointer;line-height:1.5}.line:hover,.line.active{background:#e0ecff}.time{min-width:64px;color:#2563eb;font:700 12px ui-monospace,monospace}.empty{padding:24px;color:#64748b;text-align:center}.score{font-size:30px;font-weight:800}.footer-note{text-align:center;color:#94a3b8;font-size:12px;margin-top:20px}.repeat-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0;padding:10px 12px;border:1px solid #e2e8f0;border-radius:14px;background:#fff}.repeat-label{font-size:12px;color:#64748b;font-weight:700}@media(max-width:800px){.gradio-container{padding:10px!important}.hero{padding:20px}.hero h1{font-size:27px}.stats{grid-template-columns:1fr 1fr}.lines{max-height:460px}}'''
-JS=r'''() => {let i=-1,n=[],repeatCount=1,repeatsLeft=0,repeatTimer=null;const cmd=(f,a=[])=>{let x=document.getElementById('ytplayer');if(x?.contentWindow)x.contentWindow.postMessage(JSON.stringify({event:'command',func:f,args:a}),'*')};const wire=()=>{n=[...document.querySelectorAll('.line')];n.forEach((b,k)=>{if(b.dataset.wired)return;b.dataset.wired=1;b.onclick=()=>go(k)});if(i>=0&&i<n.length)n[i].classList.add('active')};const clearRepeat=()=>{if(repeatTimer){clearTimeout(repeatTimer);repeatTimer=null}};const scheduleRepeat=()=>{clearRepeat();if(repeatCount<=1||i<0||!n.length)return;let b=n[i],start=+b.dataset.start,end=+b.dataset.end;if(!(end>start))return;let duration=Math.max(0.25,end-start)*1000;repeatTimer=setTimeout(()=>{if(repeatsLeft>0){repeatsLeft--;cmd('seekTo',[start,true]);cmd('playVideo');scheduleRepeat()}},duration+150)};const go=k=>{if(!n.length)return;i=Math.max(0,Math.min(k,n.length-1));n.forEach(x=>x.classList.remove('active'));let b=n[i];b.classList.add('active');b.scrollIntoView({behavior:'smooth',block:'center'});clearRepeat();repeatsLeft=Math.max(0,repeatCount-1);cmd('seekTo',[+b.dataset.start,true]);cmd('playVideo');scheduleRepeat()};const repeat=()=>{if(i<0){go(0);return}let b=n[i];clearRepeat();repeatsLeft=Math.max(0,repeatCount-1);cmd('seekTo',[+b.dataset.start,true]);cmd('playVideo');scheduleRepeat()};wire();new MutationObserver(wire).observe(document.body,{subtree:true,childList:true});window.EL={play:()=>cmd('playVideo'),pause:()=>{clearRepeat();cmd('pauseVideo')},back:()=>{clearRepeat();cmd('seekTo',[0,true])},speed:r=>cmd('setPlaybackRate',[+r]),prevSentence:()=>go(i<0?n.length-1:i-1),nextSentence:()=>go(i<0?0:i+1),repeat:repeat,setRepeatCount:v=>{repeatCount=(v==='infinite'||v==='∞')?999999:Math.max(1,parseInt(v,10)||1);repeatsLeft=Math.max(0,repeatCount-1);scheduleRepeat()}}}'''
+JS=r'''() => {let i=-1,n=[],repeatCount=1,repeatsLeft=0,repeatTimer=null,repeatDeadline=0,rate=1,repeatRemainingMs=null;const cmd=(f,a=[])=>{let x=document.getElementById('ytplayer');if(x?.contentWindow)x.contentWindow.postMessage(JSON.stringify({event:'command',func:f,args:a}),'*')};const wire=()=>{let next=[...document.querySelectorAll('.line')];if(n.length&&(next.length!==n.length||next[0]!==n[0])){i=-1;clearRepeat()}n=next;n.forEach((b,k)=>{if(b.dataset.wired)return;b.dataset.wired=1;b.onclick=()=>go(k)});if(i>=0&&i<n.length)n[i].classList.add('active')};const clearRepeat=()=>{if(repeatTimer){clearTimeout(repeatTimer);repeatTimer=null}repeatDeadline=0};const scheduleRepeat=(remainingMs=null)=>{clearRepeat();if(i<0||!n.length)return;let b=n[i],start=+b.dataset.start,end=+b.dataset.end;if(!(end>start))return;let duration=(remainingMs===null?Math.max(0.25,end-start)*1000:remainingMs)/rate;repeatRemainingMs=null;repeatDeadline=Date.now()+duration+150;repeatTimer=setTimeout(()=>{repeatTimer=null;repeatDeadline=0;if(repeatsLeft>0){repeatsLeft--;cmd('seekTo',[start,true]);cmd('playVideo');scheduleRepeat()}},duration+150)};const go=k=>{if(!n.length)return;i=Math.max(0,Math.min(k,n.length-1));n.forEach(x=>x.classList.remove('active'));let b=n[i];b.classList.add('active');b.scrollIntoView({behavior:'smooth',block:'center'});clearRepeat();repeatRemainingMs=null;repeatsLeft=Math.max(0,repeatCount-1);cmd('seekTo',[+b.dataset.start,true]);cmd('playVideo');scheduleRepeat()};const repeat=()=>{if(i<0){go(0);return}let b=n[i];clearRepeat();repeatRemainingMs=null;repeatsLeft=Math.max(0,repeatCount-1);cmd('seekTo',[+b.dataset.start,true]);cmd('playVideo');scheduleRepeat()};wire();new MutationObserver(wire).observe(document.body,{subtree:true,childList:true});window.EL={play:()=>{cmd('playVideo');if(repeatRemainingMs!==null){let remaining=repeatRemainingMs;repeatRemainingMs=null;scheduleRepeat(remaining)}},pause:()=>{if(repeatTimer)repeatRemainingMs=Math.max(0,repeatDeadline-Date.now()-150)*rate;clearRepeat();cmd('pauseVideo')},back:()=>{clearRepeat();repeatRemainingMs=null;repeatsLeft=0;cmd('seekTo',[0,true])},speed:r=>{let active=repeatTimer!==null;let remaining=active?Math.max(0,repeatDeadline-Date.now()-150)*rate:0;clearRepeat();rate=+r||1;cmd('setPlaybackRate',[rate]);if(active&&i>=0){let b=n[i],delay=remaining/rate;repeatDeadline=Date.now()+delay+150;repeatTimer=setTimeout(()=>{repeatTimer=null;repeatDeadline=0;if(repeatsLeft>0){repeatsLeft--;cmd('seekTo',[+b.dataset.start,true]);cmd('playVideo');scheduleRepeat()}},delay+150)}},prevSentence:()=>go(i<0?n.length-1:i-1),nextSentence:()=>go(i<0?0:i+1),repeat:repeat,setRepeatCount:v=>{let active=repeatTimer!==null;let remaining=active?Math.max(0,repeatDeadline-Date.now()-150)*rate:null;clearRepeat();repeatCount=(v==='infinite'||v==='∞')?999999:Math.max(1,parseInt(v,10)||1);repeatsLeft=Math.max(0,repeatCount-1);if(active)scheduleRepeat(remaining)}}}'''
 
 with gr.Blocks(title='English Learning Lab V3',css=CSS,js=JS,theme=gr.themes.Soft()) as demo:
     gr.HTML(f"<div class='hero'><h1>🎧 English Learning Lab</h1><div class='sub'>Listening · Reading · Shadowing · Pronunciation · Grammar · Vocabulary · Quiz · Spaced Repetition</div><span class='badge'>V3 · Final Transcript · {len(VIDEOS)} lessons · {TOTAL:,} sentence segments</span></div>")
@@ -110,9 +126,9 @@ with gr.Blocks(title='English Learning Lab V3',css=CSS,js=JS,theme=gr.themes.Sof
     with gr.Tabs():
         with gr.Tab('🎧 Listening / Shadowing'):
             practice_out=gr.Markdown(); practice_btn=gr.Button('🚀 Chuẩn bị luyện tập',variant='primary'); sentence_no=gr.Number(value=0,precision=0,label='Số câu (0 = câu đầu)'); mark_btn=gr.Button('✅ Đánh dấu câu đã luyện'); mark_out=gr.Markdown()
-        with gr.Tab('🎤 Pronunciation'):
+        with gr.Tab('🎤 Text Match'):
             target=gr.Textbox(label='Câu mẫu',lines=2); spoken=gr.Textbox(label='Câu bạn đọc / Speech-to-text',lines=2); pron_btn=gr.Button('🎯 Chấm độ khớp',variant='primary'); pron_out=gr.Markdown(); gr.Markdown('Dùng mic/Speech-to-text của trình duyệt rồi chấm độ khớp từ. Không giả lập điểm chất lượng âm thanh.')
-        with gr.Tab('🤖 AI Tutor'):
+        with gr.Tab('🤖 AI Tutor · Prompt'):
             with gr.Row():grammar_btn=gr.Button('📖 Grammar'); vocab_btn=gr.Button('📚 Vocabulary')
             ai_out=gr.Markdown('Chọn bài rồi yêu cầu AI phân tích.')
         with gr.Tab('🧠 Quiz'):quiz_btn=gr.Button('🎯 Tạo Quiz',variant='primary'); quiz_out=gr.Markdown()
@@ -120,7 +136,7 @@ with gr.Blocks(title='English Learning Lab V3',css=CSS,js=JS,theme=gr.themes.Sof
         with gr.Tab('📦 Data'):parsed=gr.Code(to_json(MAP.get(DEFAULT,{}).get('transcript',[])),language='json',label='Final Transcript JSON',lines=12)
     gr.Markdown('### 📥 Import transcript dự phòng')
     with gr.Row():file=gr.File(file_types=['.txt','.srt','.vtt','.json'],type='filepath',label='TXT / SRT / VTT / JSON'); text=gr.Textbox(label='Hoặc dán transcript',lines=4)
-    imp=gr.Button('🚀 Import transcript'); imp_status=gr.Markdown(); gr.HTML("<div class='footer-note'>English Learning Lab V3 · production ưu tiên final_transcripts.json · HF Space không tải YouTube</div>")
-    search_box.change(search,search_box,lesson); lesson.change(select,lesson,[status,player,trans,parsed,url]); open_btn.click(select,lesson,[status,player,trans,parsed,url]); url_btn.click(open_url,url,[status,player,trans,parsed,url]); prev.click(lambda x:move(x,-1),lesson,lesson).then(select,lesson,[status,player,trans,parsed,url]); nxt.click(lambda x:move(x,1),lesson,lesson).then(select,lesson,[status,player,trans,parsed,url]); show.change(lambda s,vid:transcript_html(MAP.get(vid,{}).get('transcript',[])) if s else '<div class="panel"><div class="empty">Script đang ẩn.</div></div>',[show,lesson],trans); practice_btn.click(practice,lesson,practice_out); sentence_no.change(sentence_for,[lesson,sentence_no],target); mark_btn.click(mark_sentence,[lesson,sentence_no],mark_out); grammar_btn.click(grammar,lesson,ai_out); vocab_btn.click(vocab,lesson,ai_out); quiz_btn.click(quiz,lesson,quiz_out); sr_btn.click(sr,[lesson,sr_score],sr_out); pron_btn.click(pron_score,[target,spoken],pron_out); imp.click(import_transcript,[file,text],[imp_status,parsed,trans]); play.click(None,js='() => window.EL?.play()'); repeat_sentence.click(None,js='() => window.EL?.repeat()'); repeat_count.change(None,js='v => window.EL?.setRepeatCount(v)'); pause.click(None,js='() => window.EL?.pause()'); back.click(None,js='() => window.EL?.back()'); speed.change(None,js='r => window.EL?.speed(r)'); prev_sentence.click(None,js='() => window.EL?.prevSentence()'); next_sentence.click(None,js='() => window.EL?.nextSentence()')
+    imp=gr.Button('👁️ Xem trước transcript'); imp_status=gr.Markdown(); gr.HTML("<div class='footer-note'>English Learning Lab V3 · production ưu tiên final_transcripts.json · HF Space không tải YouTube</div>")
+    search_box.change(search,search_box,lesson); lesson.change(select,lesson,[status,player,trans,parsed,lesson,url]); open_btn.click(select,lesson,[status,player,trans,parsed,lesson,url]); url_btn.click(open_url,url,[status,player,trans,parsed,lesson,url]); prev.click(lambda x:move(x,-1),lesson,lesson).then(select,lesson,[status,player,trans,parsed,lesson,url]); nxt.click(lambda x:move(x,1),lesson,lesson).then(select,lesson,[status,player,trans,parsed,lesson,url]); show.change(lambda s,vid:transcript_html(MAP.get(vid,{}).get('transcript',[])) if s else '<div class="panel"><div class="empty">Script đang ẩn.</div></div>',[show,lesson],trans); practice_btn.click(practice,lesson,practice_out); sentence_no.change(sentence_for,[lesson,sentence_no],target); mark_btn.click(mark_sentence,[lesson,sentence_no],[mark_out,status]); grammar_btn.click(grammar,lesson,ai_out); vocab_btn.click(vocab,lesson,ai_out); quiz_btn.click(quiz,lesson,quiz_out); sr_btn.click(sr,[lesson,sr_score],sr_out); pron_btn.click(pron_score,[target,spoken],pron_out); imp.click(import_transcript,[file,text],[imp_status,parsed,trans]); play.click(None,js='() => window.EL?.play()'); repeat_sentence.click(None,js='() => window.EL?.repeat()'); repeat_count.change(None,js='v => window.EL?.setRepeatCount(v)'); pause.click(None,js='() => window.EL?.pause()'); back.click(None,js='() => window.EL?.back()'); speed.change(None,js='r => window.EL?.speed(r)'); prev_sentence.click(None,js='() => window.EL?.prevSentence()'); next_sentence.click(None,js='() => window.EL?.nextSentence()')
 
 demo.launch(server_name='0.0.0.0',server_port=int(os.getenv('PORT','7860')))
