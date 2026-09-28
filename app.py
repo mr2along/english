@@ -143,7 +143,7 @@ with gr.Blocks(title='English Learning Lab V3',css=CSS,js=JS,theme=gr.themes.Sof
     with gr.Row():
         with gr.Column(scale=7):player=gr.HTML(yt(DEFAULT))
         with gr.Column(scale=5):trans=gr.HTML(transcript_html(MAP.get(DEFAULT,{}).get('transcript',[])))
-    with gr.Row():prev_sentence=gr.Button('⏮ Câu trước'); play=gr.Button('▶ Phát'); repeat_sentence=gr.Button('🔁 Lặp câu'); pause=gr.Button('⏸ Dừng'); next_sentence=gr.Button('Câu kế tiếp ⏭'); back=gr.Button('↺ Về đầu'); speed=gr.Dropdown([0.5,0.75,1,1.25,1.5],value=1,label='⚡ Tốc độ')
+    with gr.Row():prev_sentence=gr.Button('⏮ Câu trước'); play=gr.Button('▶ Phát'); repeat_sentence=gr.Button('🔁 Lặp câu'); pause=gr.Button('⏸ Dừng'); next_sentence=gr.Button('Câu kế tiếp ⏭'); back=gr.Button('↺ Về đầu'); speed=gr.Dropdown([0.5,0.75,1,1.25,1.5],value=1,label='⚡ Tốc độ',interactive=True)
     with gr.Row(elem_classes='repeat-bar'):
         gr.HTML('<span class="repeat-label">🔁 Số lần lặp:</span>')
         repeat_1=gr.Button('1×',elem_classes='repeat-choice selected'); repeat_2=gr.Button('2×',elem_classes='repeat-choice'); repeat_3=gr.Button('3×',elem_classes='repeat-choice'); repeat_5=gr.Button('5×',elem_classes='repeat-choice'); repeat_infinite=gr.Button('∞',elem_classes='repeat-choice')
