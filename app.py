@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import random
 import re
+import tempfile
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -21,6 +25,13 @@ from core.library import load, video_id
 from core.practice import make_quiz
 from core.progress import ProgressStore
 from core.transcript import format_time, parse_manual, to_json
+from core.whisperx_runner import (
+    SUPPORTED_AUDIO_SUFFIXES,
+    YOUTUBE_ID_RE,
+    make_payload,
+    transcribe_file,
+    write_outputs,
+)
 
 
 BASE = Path(__file__).resolve().parent
@@ -425,6 +436,48 @@ def import_transcript(file: str | None, text: str | None, vid: str | None):
         return f"❌ Parse lỗi: {html.escape(str(error))}", "[]", transcript_html([])
 
 
+def run_whisperx_ui(
+    audio_file: str | None,
+    vid: str | None,
+    title: str | None,
+    model_name: str,
+    language: str,
+    device: str,
+    compute_type: str,
+    batch_size: float,
+):
+    if not audio_file:
+        return "❌ Hãy tải lên tệp audio/video trước.", "{}", None, None
+    if vid and not YOUTUBE_ID_RE.fullmatch(vid.strip()):
+        return "❌ YouTube Video ID phải có đúng 11 ký tự hợp lệ.", "{}", None, None
+    try:
+        source_name = Path(audio_file).name
+        result = transcribe_file(
+            audio_file,
+            model_name=model_name,
+            language=None if language == "auto" else language,
+            device=device,
+            compute_type=compute_type,
+            batch_size=int(batch_size),
+        )
+        payload = make_payload(result, source_name=source_name, video_id=vid, title=title)
+        output_dir = Path(tempfile.gettempdir()) / "english-lab-whisperx"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        unique = uuid.uuid4().hex[:10]
+        json_path = output_dir / f"transcript_{unique}.json"
+        srt_path = output_dir / f"transcript_{unique}.srt"
+        json_file, srt_file = write_outputs(payload, json_path, srt_path)
+        lesson = payload["videos"][0]
+        status = (
+            f"✅ Hoàn tất: {lesson['sentence_count']:,} đoạn, "
+            f"{lesson['word_count']:,} từ đã căn chỉnh · "
+            f"ngôn ngữ `{result['language']}` · thiết bị `{result['device']}`."
+        )
+        return status, json.dumps(payload, ensure_ascii=False, indent=2), str(json_file), str(srt_file)
+    except Exception as error:
+        return f"❌ {html.escape(str(error))}", "{}", None, None
+
+
 CSS = r"""
 body{background:#f8fafc}
 .gradio-container{max-width:1480px!important;padding:18px 22px 40px!important}
@@ -456,8 +509,13 @@ body{background:#f8fafc}
 .repeat-label{font-size:12px;color:#64748b;font-weight:700}
 .repeat-choice button{min-width:48px;min-height:42px}
 .repeat-choice.selected button{background:#2563eb!important;color:#fff!important;border-color:#2563eb!important}
+.whisperx-id-row{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.whisperx-id-row>*{min-width:0}
+.whisperx-control-row{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.whisperx-control-row>*{min-width:0}
 @media(max-width:900px){.gradio-container{padding:12px!important}.hero{padding:22px}.hero h1{font-size:29px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.lines{max-height:480px}}
-@media(max-width:600px){.gradio-container{padding:8px!important}.hero{padding:17px;border-radius:18px}.hero h1{font-size:24px}.hero .sub{font-size:13px}.stats{gap:8px}.stat{padding:12px;border-radius:14px}.num{font-size:20px}.line{gap:8px;padding:10px 8px}.time{flex-basis:54px;font-size:11px}.panel-title{padding:12px}.repeat-bar{gap:6px;padding:8px}.repeat-choice button{min-width:42px}.video{border-radius:12px 12px 0 0}}
+@media(max-width:900px){.whisperx-control-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.gradio-container{padding:8px!important}.hero{padding:17px;border-radius:18px}.hero h1{font-size:24px}.hero .sub{font-size:13px}.stats{gap:8px}.stat{padding:12px;border-radius:14px}.num{font-size:20px}.line{gap:8px;padding:10px 8px}.time{flex-basis:54px;font-size:11px}.panel-title{padding:12px}.repeat-bar{gap:6px;padding:8px}.repeat-choice button{min-width:42px}.video{border-radius:12px 12px 0 0}.whisperx-control-row{grid-template-columns:minmax(0,1fr)}}
 """
 
 
@@ -601,6 +659,61 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
                 label="Transcript JSON của bài đang chọn",
                 lines=12,
             )
+        with gr.Tab("🎙️ WhisperX"):
+            if find_spec("whisperx"):
+                gr.Markdown(
+                    "Tải audio/video lên để nhận dạng lời thoại và căn timestamp đến từng từ. "
+                    "Tệp được xử lý trên máy chủ đang chạy English Lab."
+                )
+            else:
+                gr.Markdown(
+                    "WhisperX chưa được cài trong runtime này. Chạy "
+                    "`pip install -r requirements-whisperx.txt` rồi khởi động lại app. "
+                    "Image Docker của repo đã được cấu hình cài WhisperX CPU khi deploy."
+                )
+            whisperx_audio = gr.File(
+                label="Audio / video cần chép lời",
+                file_types=sorted(SUPPORTED_AUDIO_SUFFIXES),
+                type="filepath",
+            )
+            with gr.Row(elem_classes="whisperx-id-row"):
+                whisperx_video_id = gr.Textbox(
+                    label="YouTube Video ID (nếu muốn ghép vào thư viện)",
+                    placeholder="Ví dụ: dQw4w9WgXcQ",
+                    scale=1,
+                )
+                whisperx_title = gr.Textbox(label="Tên bài (không bắt buộc)", scale=2)
+            with gr.Row(elem_classes="whisperx-control-row"):
+                whisperx_model = gr.Dropdown(
+                    ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"],
+                    value="small",
+                    label="Whisper model",
+                )
+                whisperx_language = gr.Dropdown(
+                    ["auto", "en", "vi", "es", "fr", "de", "it", "ja", "ko", "zh", "pt", "ru"],
+                    value="auto",
+                    label="Ngôn ngữ",
+                )
+            with gr.Row(elem_classes="whisperx-control-row"):
+                whisperx_device = gr.Dropdown(
+                    ["auto", "cpu", "cuda"], value="auto", label="Thiết bị"
+                )
+                whisperx_compute = gr.Dropdown(
+                    ["default", "int8", "float16", "float32"],
+                    value="int8",
+                    label="Compute type",
+                )
+                whisperx_batch = gr.Slider(
+                    1, 16, value=4, step=1, label="Batch size"
+                )
+            whisperx_run = gr.Button("🎙️ Chạy WhisperX", variant="primary")
+            whisperx_status = gr.Markdown()
+            whisperx_json = gr.Code(
+                language="json", label="Transcript JSON (timestamps câu và từ)", lines=16
+            )
+            with gr.Row():
+                whisperx_json_file = gr.File(label="Tải JSON")
+                whisperx_srt_file = gr.File(label="Tải phụ đề SRT")
 
     gr.Markdown("### 📥 Import transcript dự phòng")
     with gr.Row():
@@ -650,6 +763,23 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
     due_play_btn.click(None, sentence_no, js="n => {window.EL?.playSentence(n); return []}")
     pron_btn.click(pron_score, [target, spoken], pron_out)
     imp.click(import_transcript, [file, text, lesson], [imp_status, parsed, trans])
+    whisperx_run.click(
+        run_whisperx_ui,
+        [
+            whisperx_audio,
+            whisperx_video_id,
+            whisperx_title,
+            whisperx_model,
+            whisperx_language,
+            whisperx_device,
+            whisperx_compute,
+            whisperx_batch,
+        ],
+        [whisperx_status, whisperx_json, whisperx_json_file, whisperx_srt_file],
+        concurrency_id="whisperx-job",
+        concurrency_limit=1,
+        time_limit=3600,
+    )
     progress_state.change(progress_stat, progress_state, progress_stat_out)
     demo.load(progress_stat, progress_state, progress_stat_out)
 

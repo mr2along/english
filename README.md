@@ -22,6 +22,7 @@ English listening and shadowing practice built with Gradio. The app uses the pre
 - Create changing fill-in-the-blank or listen-and-type quizzes and check answers.
 - Schedule individual sentences for spaced review and load sentences that are due.
 - Preview imported TXT, SRT, WebVTT, or JSON transcripts. Previewing does not overwrite the published lesson library.
+- Run optional WhisperX recognition and forced alignment on an uploaded audio/video file; download the resulting JSON and SRT. JSON keeps word-level timestamps for later addition to the lesson library.
 
 Learning progress is stored in the visitor's browser using a stable, app-specific Gradio BrowserState key. It is private to that browser and is not shared between Space visitors. Clearing browser storage removes it; it is not backed up to the Space server or synchronized across devices. Set `ENGLISH_LAB_BROWSER_STATE_SECRET` in the environment to override the default state-protection key.
 
@@ -34,7 +35,27 @@ pip install -r requirements.txt
 python app.py
 ```
 
-The Space runtime installs Gradio only; the app does not download YouTube captions or audio. `core/qwen_mapper.py` is an optional local sentence-mapping utility. Install `requirements-ml.txt` before loading its Qwen model. The transcript generation/alignment pipeline is not included in this repository; the Space serves the checked-in transcript library.
+The Space Docker image installs Gradio, CPU-only PyTorch, WhisperX, and FFmpeg so the WhisperX tab works after deployment. WhisperX model weights are downloaded only on the first transcription request; the default model is `small` with `int8` computation for CPU use. The default Space hardware is CPU, so processing may take a while for long files. The app does not download YouTube captions or audio.
+
+### Run WhisperX locally
+
+Install the optional dependency set in the same environment as the app:
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-whisperx.txt
+python app.py
+```
+
+The WhisperX tab accepts one local audio/video file, detects language automatically or uses the selected language, aligns recognized words, and provides JSON/SRT downloads. The default model is `small`; larger models need more memory and take longer, especially on CPU. FFmpeg must be installed and available on `PATH`. For GPU use, install a PyTorch build compatible with the machine's CUDA setup before installing WhisperX.
+
+The same processor can run from the command line:
+
+```bash
+python Transcription/run_whisperx.py path/to/audio.mp3 --video-id dQw4w9WgXcQ --title "Lesson title"
+```
+
+Without `--video-id`, the result is still a standalone transcript, but it cannot be matched to a YouTube lesson in the library. JSON and SRT files are written under `Transcription/whisperx_outputs/` by default. Uploading a transcript file in English Lab only previews it; it does not overwrite the published transcript library. `core/qwen_mapper.py` remains an optional local sentence-mapping utility; install `requirements-ml.txt` before loading its Qwen model.
 
 ## Deploy
 
