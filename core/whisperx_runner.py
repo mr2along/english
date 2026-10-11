@@ -39,8 +39,9 @@ def transcribe_file(
     device: str = "auto",
     compute_type: str = "default",
     batch_size: int = 4,
+    align_words: bool = True,
 ) -> dict[str, Any]:
-    """Transcribe one local audio/video file and align its words with WhisperX."""
+    """Transcribe one local audio/video file and optionally align its words."""
     path = Path(audio_path).expanduser().resolve()
     if not path.is_file():
         raise ValueError("Không tìm thấy tệp audio/video đã tải lên.")
@@ -93,23 +94,26 @@ def transcribe_file(
         if requested_device == "cuda":
             torch.cuda.empty_cache()
 
-        align_model, align_metadata = whisperx.load_align_model(
-            language_code=detected_language,
-            device=requested_device,
-        )
-        if align_model is None or align_metadata is None:
-            raise RuntimeError(
-                f"Không tìm thấy mô hình căn chỉnh cho ngôn ngữ `{detected_language}`."
+        if align_words:
+            align_model, align_metadata = whisperx.load_align_model(
+                language_code=detected_language,
+                device=requested_device,
             )
-        aligned = whisperx.align(
-            raw_segments,
-            align_model,
-            align_metadata,
-            audio,
-            requested_device,
-            return_char_alignments=False,
-        )
-        aligned_segments = aligned.get("segments") or []
+            if align_model is None or align_metadata is None:
+                raise RuntimeError(
+                    f"Không tìm thấy mô hình căn chỉnh cho ngôn ngữ `{detected_language}`."
+                )
+            aligned = whisperx.align(
+                raw_segments,
+                align_model,
+                align_metadata,
+                audio,
+                requested_device,
+                return_char_alignments=False,
+            )
+            aligned_segments = aligned.get("segments") or []
+        else:
+            aligned_segments = raw_segments
         segments: list[dict[str, Any]] = []
         for raw in aligned_segments:
             text = re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()

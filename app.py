@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import random
@@ -19,7 +20,7 @@ from urllib.parse import quote
 
 import gradio as gr
 
-from core.ai_tutor import grammar_request, vocabulary_request
+from core.ai_tutor import explain, grammar_request, vocabulary_request
 from core.learning_engine import make_practice_items
 from core.library import load, video_id
 from core.practice import make_quiz
@@ -104,24 +105,27 @@ def _store(progress_data: Any = None) -> ProgressStore:
 
 def progress_stat(progress_data: Any = None) -> str:
     store = _store(progress_data)
-    practiced_lessons = sum(
-        bool(item.get("sentences")) or bool(item.get("completed"))
-        for item in store.data["lessons"].values()
+    practiced_lessons = {
+        str(video_id).split(":import:", 1)[0]
+        for video_id, item in store.data["lessons"].items()
         if isinstance(item, dict)
-    )
+        and (bool(item.get("sentences")) or bool(item.get("completed")))
+    }
     due = store.due_count()
     return (
         '<div class="stat"><div class="num">'
-        f"{practiced_lessons:,}</div><div class=\"label\">📈 Bài đã luyện · {due:,} câu đến hạn</div></div>"
+        f"{len(practiced_lessons):,}</div><div class=\"label\">📈 Bài đã luyện · {due:,} câu đến hạn</div></div>"
     )
 
 
-def lesson_status(vid: str | None, progress_data: Any = None) -> str:
+def lesson_status(
+    vid: str | None, progress_data: Any = None, transcript_override: Any = None
+) -> str:
     video = MAP.get(vid)
     if not video:
         return "Chưa chọn bài học."
-    segments = video.get("transcript", [])
-    lesson = _store(progress_data).lesson(vid)
+    segments = effective_segments(vid, transcript_override)
+    lesson = _store(progress_data).lesson(progress_scope(vid, transcript_override))
     done = sum(
         1
         for key, value in lesson.get("sentences", {}).items()
@@ -129,9 +133,13 @@ def lesson_status(vid: str | None, progress_data: Any = None) -> str:
     )
     percent = round(done / len(segments) * 100) if segments else 0
     title = html.escape(str(video.get("title", vid)))
-    source = html.escape(str(video.get("transcript_source", "final_transcript")))
-    alignment = html.escape(str(video.get("alignment", "final_alignment")))
-    raw_count = len(video.get("raw_transcript", segments))
+    source = html.escape(
+        "session_import" if transcript_override else video.get("transcript_source", "final_transcript")
+    )
+    alignment = html.escape(
+        "user_imported" if transcript_override else video.get("alignment", "final_alignment")
+    )
+    raw_count = len(segments) if transcript_override else len(video.get("raw_transcript", segments))
     return (
         f"### 🎯 {video.get('position', '')} · {title}\n"
         f"`{vid}` · {video.get('language', 'en')} · **{len(segments):,} câu** · **{percent}% đã luyện**\n\n"
@@ -139,7 +147,37 @@ def lesson_status(vid: str | None, progress_data: Any = None) -> str:
     )
 
 
-def select(vid: str | None, progress_data: Any = None):
+def effective_segments(vid: str | None, transcript_override: Any = None):
+    if (
+        isinstance(transcript_override, dict)
+        and transcript_override.get("video_id") == vid
+        and isinstance(transcript_override.get("segments"), list)
+    ):
+        return transcript_override["segments"]
+    return MAP.get(vid, {}).get("transcript", [])
+
+
+def progress_scope(vid: str | None, transcript_override: Any = None) -> str | None:
+    """Keep practice progress for imported session transcripts separate."""
+    if not vid:
+        return None
+    if (
+        isinstance(transcript_override, dict)
+        and transcript_override.get("video_id") == vid
+        and isinstance(transcript_override.get("segments"), list)
+    ):
+        canonical = json.dumps(
+            transcript_override["segments"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+        return f"{vid}:import:{fingerprint}"
+    return vid
+
+
+def select(vid: str | None, progress_data: Any = None, transcript_override: Any = None):
     if vid not in MAP:
         return (
             "❌ Không tìm thấy bài học.",
@@ -151,12 +189,18 @@ def select(vid: str | None, progress_data: Any = None):
             progress_data or EMPTY_PROGRESS,
             0,
             "",
+            None,
         )
     store = _store(progress_data)
     video = MAP[vid]
-    segments = video.get("transcript", [])
+    active_override = (
+        transcript_override
+        if isinstance(transcript_override, dict) and transcript_override.get("video_id") == vid
+        else None
+    )
+    segments = effective_segments(vid, active_override)
     return (
-        lesson_status(vid, store.data),
+        lesson_status(vid, store.data, active_override),
         yt(vid),
         transcript_html(segments),
         to_json(segments),
@@ -164,14 +208,15 @@ def select(vid: str | None, progress_data: Any = None):
         f"https://www.youtube.com/watch?v={vid}",
         store.data,
         0,
-        sentence_for(vid, 0),
+        sentence_for(vid, 0, active_override),
+        active_override,
     )
 
 
-def open_url(value: str | None, progress_data: Any = None):
+def open_url(value: str | None, progress_data: Any = None, transcript_override: Any = None):
     vid = video_id(value or "")
     if vid in MAP:
-        return select(vid, progress_data)
+        return select(vid, progress_data, transcript_override)
     return (
         "❌ URL/Video ID không có trong thư viện bài học.",
         yt(None),
@@ -182,6 +227,7 @@ def open_url(value: str | None, progress_data: Any = None):
         progress_data or EMPTY_PROGRESS,
         0,
         "",
+        None,
     )
 
 
@@ -208,8 +254,8 @@ def move(vid: str | None, direction: int):
     return ids[(index + direction) % len(ids)]
 
 
-def sentence_for(vid: str | None, index: Any) -> str:
-    segments = MAP.get(vid, {}).get("transcript", [])
+def sentence_for(vid: str | None, index: Any, transcript_override: Any = None) -> str:
+    segments = effective_segments(vid, transcript_override)
     if not segments:
         return ""
     try:
@@ -220,81 +266,120 @@ def sentence_for(vid: str | None, index: Any) -> str:
     return str(segments[number].get("text", ""))
 
 
-def mark_sentence(vid: str | None, index: Any, progress_data: Any = None):
+def mark_sentence(
+    vid: str | None,
+    index: Any,
+    progress_data: Any = None,
+    transcript_override: Any = None,
+):
     if vid not in MAP:
         return "Chưa chọn bài.", "Chưa chọn bài học.", progress_data or EMPTY_PROGRESS
-    segments = MAP[vid].get("transcript", [])
+    segments = effective_segments(vid, transcript_override)
     try:
         number = int(float(index))
     except (TypeError, ValueError, OverflowError):
         number = -1
     if not segments:
-        return "Bài này chưa có transcript.", lesson_status(vid, progress_data), progress_data or EMPTY_PROGRESS
+        return "Bài này chưa có transcript.", lesson_status(vid, progress_data, transcript_override), progress_data or EMPTY_PROGRESS
     if number < 0 or number >= len(segments):
         return (
             f"❌ Số câu phải nằm trong khoảng 0–{len(segments) - 1}.",
-            lesson_status(vid, progress_data),
+            lesson_status(vid, progress_data, transcript_override),
             progress_data or EMPTY_PROGRESS,
         )
     store = _store(progress_data)
-    store.mark_sentence(vid, number, len(segments))
-    return f"✅ Đã đánh dấu câu {number + 1}.", lesson_status(vid, store.data), store.data
+    store.mark_sentence(progress_scope(vid, transcript_override), number, len(segments))
+    return f"✅ Đã đánh dấu câu {number + 1}.", lesson_status(vid, store.data, transcript_override), store.data
 
 
-def practice(vid: str | None, progress_data: Any = None) -> str:
+def practice(vid: str | None, progress_data: Any = None, transcript_override: Any = None):
     video = MAP.get(vid)
     if not video:
-        return "Chưa chọn bài."
-    items = make_practice_items(video.get("transcript", []))
-    lesson = _store(progress_data).lesson(vid)
-    completed = sum(bool(value) for value in lesson["sentences"].values())
-    return (
+        return "Chưa chọn bài.", 0, ""
+    items = make_practice_items(effective_segments(vid, transcript_override))
+    if not items:
+        return "Bài này chưa có câu để luyện.", 0, ""
+    lesson = _store(progress_data).lesson(progress_scope(vid, transcript_override))
+    completed_indices = {
+        str(item["index"])
+        for item in items
+        if lesson["sentences"].get(str(item["index"]))
+    }
+    completed = len(completed_indices)
+    next_item = next(
+        (item for item in items if str(item["index"]) not in completed_indices),
+        items[0],
+    )
+    all_done = completed == len(items)
+    next_message = (
+        "Đã luyện hết bài; bắt đầu lại từ câu đầu."
+        if all_done
+        else f"Câu tiếp theo chưa luyện: {next_item['index'] + 1}."
+    )
+    message = (
         f"### 🎧 Listening / Shadowing\n**{len(items):,} câu luyện tập · "
         f"{completed:,} câu đã đánh dấu**\n\n"
-        "Chọn số câu (bắt đầu từ 0) rồi bấm **Phát câu đang chọn**. "
-        "Có thể giảm tốc độ, shadowing và đánh dấu câu đã luyện."
+        f"{next_message} "
+        "Nghe câu, shadowing rồi bấm **Đánh dấu câu đã luyện** để chuyển tiếp."
     )
+    index = next_item["index"]
+    return message, index, sentence_for(vid, index, transcript_override)
 
 
-def grammar(vid: str | None, index: Any) -> str:
-    text = sentence_for(vid, index)
+def grammar(vid: str | None, index: Any, transcript_override: Any = None) -> str:
+    text = sentence_for(vid, index, transcript_override)
     if not text:
         return "Chưa có câu để phân tích."
-    return (
-        "### Prompt phân tích ngữ pháp\nSao chép prompt này vào trợ lý AI bạn đang dùng.\n\n"
-        + grammar_request(text)["prompt"]
-    )
+    try:
+        return "### 📖 AI Tutor · Grammar\n\n" + explain("grammar", text)
+    except Exception as error:
+        prompt = grammar_request(text)["prompt"]
+        return (
+            "### AI Tutor chưa sẵn sàng\n"
+            f"{html.escape(str(error))}\n\nPrompt dự phòng để sao chép:\n\n{html.escape(prompt)}"
+        )
 
 
-def vocab(vid: str | None, index: Any) -> str:
-    text = sentence_for(vid, index)
+def vocab(vid: str | None, index: Any, transcript_override: Any = None) -> str:
+    text = sentence_for(vid, index, transcript_override)
     if not text:
         return "Chưa có câu để phân tích."
-    return (
-        "### Prompt từ vựng\nSao chép prompt này vào trợ lý AI bạn đang dùng.\n\n"
-        + vocabulary_request("", sentence=text)["prompt"]
-    )
+    try:
+        return "### 📚 AI Tutor · Vocabulary\n\n" + explain("vocabulary", text)
+    except Exception as error:
+        prompt = vocabulary_request("", sentence=text)["prompt"]
+        return (
+            "### AI Tutor chưa sẵn sàng\n"
+            f"{html.escape(str(error))}\n\nPrompt dự phòng để sao chép:\n\n{html.escape(prompt)}"
+        )
 
 
-def quiz(vid: str | None, history: Any = None):
-    segments = MAP.get(vid, {}).get("transcript", [])
+def quiz(vid: str | None, history: Any = None, transcript_override: Any = None):
+    segments = effective_segments(vid, transcript_override)
     if not segments:
-        return "Bài này chưa có transcript để tạo quiz.", "", "", "", 0, []
+        return "Bài này chưa có transcript để tạo quiz.", "", "", "", 0, "", []
     candidates = [
         index for index, segment in enumerate(segments)
         if len(str(segment.get("text", "")).split()) >= 2
     ]
     if not candidates:
-        return "Không có câu đủ nội dung để tạo quiz.", "", "", "", 0, []
-    seen = {int(value) for value in (history or []) if str(value).isdigit()}
+        return "Không có câu đủ nội dung để tạo quiz.", "", "", "", 0, "", []
+    history_indices = []
+    for value in history or []:
+        if str(value).isdigit():
+            index_value = int(value)
+            if index_value not in history_indices:
+                history_indices.append(index_value)
+    seen = set(history_indices)
     available = [index for index in candidates if index not in seen]
     if not available:
         available = candidates
+        history_indices = []
         seen.clear()
     index = random.choice(available)
     question = make_quiz(segments, index)
-    seen.add(index)
-    next_history = list(seen)[-100:]
+    history_indices.append(index)
+    next_history = history_indices[-100:]
     if question["type"] == "fill_blank":
         prompt = (
             "### 🧠 Điền từ còn thiếu\n\n"
@@ -306,7 +391,15 @@ def quiz(vid: str | None, history: Any = None):
             "### 🧠 Nghe và gõ lại câu\n\n"
             "Bấm **▶ Nghe câu quiz**, rồi nhập lại câu bạn nghe."
         )
-    return prompt, question["answer"], "", "", index, next_history
+    return (
+        prompt,
+        question["answer"],
+        "",
+        "",
+        index,
+        sentence_for(vid, index, transcript_override),
+        next_history,
+    )
 
 
 def _tokens(text: Any) -> list[str]:
@@ -321,10 +414,16 @@ def check_quiz(answer: Any, expected: Any) -> str:
     return f"❌ Chưa đúng. Đáp án: **{html.escape(str(expected))}**"
 
 
-def sr(vid: str | None, index: Any, score: Any, progress_data: Any = None):
+def sr(
+    vid: str | None,
+    index: Any,
+    score: Any,
+    progress_data: Any = None,
+    transcript_override: Any = None,
+):
     if vid not in MAP:
         return "Chưa chọn bài.", progress_data or EMPTY_PROGRESS
-    segments = MAP[vid].get("transcript", [])
+    segments = effective_segments(vid, transcript_override)
     try:
         number = int(float(index))
         rating = max(0, min(5, int(float(score))))
@@ -333,7 +432,7 @@ def sr(vid: str | None, index: Any, score: Any, progress_data: Any = None):
     if number < 0 or number >= len(segments):
         return f"Số câu phải nằm trong khoảng 0–{len(segments) - 1}.", progress_data or EMPTY_PROGRESS
     store = _store(progress_data)
-    card = store.schedule_review(vid, number, rating)
+    card = store.schedule_review(progress_scope(vid, transcript_override), number, rating)
     due_at = datetime.fromisoformat(card["due_at"]).astimezone(timezone.utc)
     return (
         f"✅ Đã lập lịch cho câu {number + 1}. Mức nhớ **{rating}/5** · "
@@ -342,11 +441,14 @@ def sr(vid: str | None, index: Any, score: Any, progress_data: Any = None):
     )
 
 
-def due_reviews(vid: str | None, progress_data: Any = None):
+def due_reviews(vid: str | None, progress_data: Any = None, transcript_override: Any = None):
+    if vid not in MAP:
+        return "Chưa chọn bài học.", gr.update(choices=[], value=None)
     store = _store(progress_data)
-    due = store.due_reviews(vid)
+    scope = progress_scope(vid, transcript_override)
+    due = store.due_reviews(scope)
     total = sum(
-        isinstance(item, dict) and item.get("video_id") == vid
+        isinstance(item, dict) and item.get("video_id") == scope
         for item in store.data["reviews"].values()
     )
     choices_for_due = []
@@ -354,7 +456,7 @@ def due_reviews(vid: str | None, progress_data: Any = None):
         index = item.get("segment_index")
         if not isinstance(index, int) or vid not in MAP:
             continue
-        segments = MAP[vid].get("transcript", [])
+        segments = effective_segments(vid, transcript_override)
         if not 0 <= index < len(segments):
             continue
         text = str(segments[index].get("text", "")).strip()
@@ -366,12 +468,12 @@ def due_reviews(vid: str | None, progress_data: Any = None):
     return message, gr.update(choices=choices_for_due, value=None)
 
 
-def use_due_sentence(value: Any, vid: str | None):
+def use_due_sentence(value: Any, vid: str | None, transcript_override: Any = None):
     try:
         index = int(value)
     except (TypeError, ValueError):
         return 0, ""
-    return index, sentence_for(vid, index)
+    return index, sentence_for(vid, index, transcript_override)
 
 
 def _edit_distance(left: list[str], right: list[str]) -> int:
@@ -419,21 +521,105 @@ def pron_score(target: str | None, spoken: str | None) -> str:
     )
 
 
-def import_transcript(file: str | None, text: str | None, vid: str | None):
+def speech_to_text_ui(audio_file: str | None, model_name: str, language: str):
+    if not audio_file:
+        return gr.update(), "❌ Hãy ghi âm hoặc tải audio trước."
+    try:
+        result = transcribe_file(
+            audio_file,
+            model_name=model_name,
+            language=None if language == "auto" else language,
+            device="auto",
+            compute_type="int8",
+            batch_size=2,
+            align_words=False,
+        )
+        spoken = " ".join(
+            str(segment.get("text") or "").strip()
+            for segment in result.get("segments", [])
+            if str(segment.get("text") or "").strip()
+        ).strip()
+        if not spoken:
+            return "", "❌ Không nhận được lời thoại từ audio này."
+        return spoken, f"✅ Đã chép lời · `{result['language']}` · model `{result['model']}`."
+    except Exception as error:
+        return gr.update(), f"❌ {html.escape(str(error))}"
+
+
+def import_transcript(
+    file: str | None,
+    text: str | None,
+    vid: str | None,
+    progress_data: Any = None,
+    transcript_override: Any = None,
+):
+    unchanged = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    if vid not in MAP:
+        return "❌ Hãy chọn bài học trong thư viện trước khi nạp transcript.", *unchanged
     raw = text or ""
     if file:
         try:
             raw = Path(file).read_text(encoding="utf-8-sig")
         except (OSError, UnicodeError) as error:
-            return f"❌ Không đọc được file: {error}", "[]", transcript_html([])
+            return f"❌ Không đọc được file: {html.escape(str(error))}", *unchanged
     try:
         segments = parse_manual(raw, video_id=vid)
         if not segments:
-            return "❌ Không tìm thấy câu có timestamp trong transcript.", "[]", transcript_html([])
-        message = f"✅ Preview: {len(segments):,} câu (chưa thay transcript bài đang học)."
-        return message, to_json(segments), transcript_html(segments)
+            return "❌ Không tìm thấy câu có timestamp trong transcript.", *unchanged
+        imported = {"video_id": vid, "segments": segments}
+        message = (
+            f"✅ Đã nạp {len(segments):,} câu vào phiên hiện tại. "
+            "Bài luyện dùng transcript này trong phiên này; thư viện đã deploy không bị thay đổi."
+        )
+        return (
+            message,
+            to_json(segments),
+            transcript_html(segments),
+            imported,
+            lesson_status(vid, progress_data, imported),
+            sentence_for(vid, 0, imported),
+            0,
+        )
     except Exception as error:
-        return f"❌ Parse lỗi: {html.escape(str(error))}", "[]", transcript_html([])
+        return f"❌ Parse lỗi: {html.escape(str(error))}", *unchanged
+
+
+def import_transcript_text(
+    text: str | None,
+    vid: str | None,
+    progress_data: Any = None,
+    transcript_override: Any = None,
+):
+    return import_transcript(None, text, vid, progress_data, transcript_override)
+
+
+def restore_library_transcript(vid: str | None, progress_data: Any = None):
+    if vid not in MAP:
+        return (
+            "❌ Hãy chọn bài học trước.",
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+        )
+    segments = MAP[vid].get("transcript", [])
+    return (
+        "✅ Đã khôi phục transcript trong thư viện.",
+        to_json(segments),
+        transcript_html(segments),
+        None,
+        lesson_status(vid, progress_data),
+        sentence_for(vid, 0),
+        0,
+    )
+
+
+def export_transcript(vid: str | None, transcript_override: Any = None) -> str:
+    if vid not in MAP:
+        raise ValueError("Hãy chọn bài học trước khi tải transcript.")
+    segments = effective_segments(vid, transcript_override)
+    output_dir = Path(tempfile.gettempdir()) / "english-lab-exports"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"transcript_{vid}_{uuid.uuid4().hex[:10]}.json"
+    path.write_text(to_json(segments) + "\n", encoding="utf-8")
+    return str(path)
 
 
 def run_whisperx_ui(
@@ -536,10 +722,11 @@ const loadApi=()=>{
  const s=document.createElement('script');s.src='https://www.youtube.com/iframe_api';document.head.appendChild(s);
 };
 const call=(name,...args)=>{try{if(player?.[name])return player[name](...args)}catch(e){}return undefined};
+const syncSentence=k=>{let input=document.querySelector('#sentence-no input');if(!input)return;const setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')?.set;if(setter)setter.call(input,String(k));else input.value=String(k);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}))};
 const wire=()=>{let next=[...document.querySelectorAll('.line')];if(n.length&&(next.length!==n.length||next[0]!==n[0])){clear();i=-1}n=next;n.forEach((b,k)=>{if(!b.dataset.wired){b.dataset.wired=1;b.onclick=()=>go(k)}});if(i>=0&&i<n.length){n[i].classList.add('active');n[i].setAttribute('aria-pressed','true')}ready()};
 const segment=()=>{let b=n[i];return b?{start:+b.dataset.start,end:+b.dataset.end}:null};
 const checkEnd=ended=>{if(!active||i<0||(!ended&&call('getPlayerState')!==1))return;let s=segment();if(!s||!(s.end>s.start))return;let t=call('getCurrentTime');if(!ended&&(typeof t!=='number'||t<s.end-0.02))return;if(repeatsLeft>0){repeatsLeft--;call('seekTo',s.start,true);call('playVideo')}else{active=false;call('seekTo',s.end,true);call('pauseVideo')}};
-const go=k=>{if(!n.length)return;i=Math.max(0,Math.min(k,n.length-1));n.forEach(x=>{x.classList.remove('active');x.setAttribute('aria-pressed','false')});let b=n[i];b.classList.add('active');b.setAttribute('aria-pressed','true');b.scrollIntoView({behavior:'smooth',block:'center'});repeatsLeft=Math.max(0,repeatCount-1);active=true;call('seekTo',+b.dataset.start,true);call('playVideo')};
+const go=k=>{if(!n.length)return;i=Math.max(0,Math.min(k,n.length-1));n.forEach(x=>{x.classList.remove('active');x.setAttribute('aria-pressed','false')});let b=n[i];b.classList.add('active');b.setAttribute('aria-pressed','true');b.scrollIntoView({behavior:'smooth',block:'center'});syncSentence(i);repeatsLeft=Math.max(0,repeatCount-1);active=true;call('seekTo',+b.dataset.start,true);call('playVideo')};
 const repeat=()=>{if(i<0){go(0);return}go(i)};
 wire();loadApi();new MutationObserver(()=>{wire();loadApi()}).observe(document.body,{subtree:true,childList:true});setInterval(()=>checkEnd(false),150);
 window.EL={play:()=>call('playVideo'),playSentence:v=>{let k=parseInt(v,10);return go(Number.isFinite(k)?k:0)},pause:()=>call('pauseVideo'),back:()=>{clear();repeatsLeft=0;call('seekTo',0,true)},speed:r=>call('setPlaybackRate',+r||1),prevSentence:()=>go(i<0?n.length-1:i-1),nextSentence:()=>go(i<0?0:i+1),repeat,setRepeatCount:v=>{let selected=(v==='infinite'||v==='∞')?'∞':Math.max(1,parseInt(v,10)||1);repeatCount=selected==='∞'?999999:selected;if(active)repeatsLeft=Math.max(0,repeatCount-1);document.querySelectorAll('.repeat-choice').forEach((el,k)=>el.classList.toggle('selected',['1','2','3','5','∞'][k]===String(selected)))}};
@@ -553,6 +740,7 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
         storage_key="english-learning-lab-progress-v1",
         secret=os.getenv("ENGLISH_LAB_BROWSER_STATE_SECRET", "english-lab-progress-v1"),
     )
+    transcript_override = gr.State(None)
     quiz_history = gr.State([])
     gr.HTML(
         f"<div class='hero'><h1>🎧 English Learning Lab</h1>"
@@ -614,26 +802,42 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
         with gr.Tab("🎧 Listening / Shadowing"):
             practice_out = gr.Markdown()
             practice_btn = gr.Button("🚀 Chuẩn bị luyện tập", variant="primary")
-            sentence_no = gr.Number(value=0, precision=0, label="Số câu (bắt đầu từ 0)")
+            sentence_no = gr.Number(
+                value=0, precision=0, label="Số câu (bắt đầu từ 0)", elem_id="sentence-no"
+            )
             practice_play = gr.Button("▶ Phát câu đang chọn")
             mark_btn = gr.Button("✅ Đánh dấu câu đã luyện")
             mark_out = gr.Markdown()
         with gr.Tab("🎤 Text Match"):
             target = gr.Textbox(label="Câu mẫu", value=sentence_for(DEFAULT, 0), lines=2)
             spoken = gr.Textbox(label="Câu bạn đọc / Speech-to-text", lines=2)
+            speech_audio = gr.Audio(
+                sources=["microphone", "upload"],
+                type="filepath",
+                label="Ghi âm hoặc tải audio câu bạn đọc",
+            )
+            with gr.Row(elem_classes="whisperx-control-row"):
+                speech_model = gr.Dropdown(
+                    ["tiny", "base", "small"], value="tiny", label="Model chép lời"
+                )
+                speech_language = gr.Dropdown(
+                    ["auto", "en", "vi"], value="en", label="Ngôn ngữ audio"
+                )
+            speech_btn = gr.Button("🗣️ Chép audio vào ô câu đọc", variant="secondary")
+            speech_status = gr.Markdown()
             pron_btn = gr.Button("🎯 Chấm độ khớp văn bản", variant="primary")
             pron_out = gr.Markdown()
             gr.Markdown(
-                "Dùng mic/Speech-to-text của trình duyệt để nhập câu đã đọc. "
-                "Điểm so sánh từ theo nội dung và thứ tự; không đo chất lượng âm thanh hay phát âm."
+                "Có thể nhập văn bản hoặc ghi âm để WhisperX chép lời. Điểm so sánh nội dung và thứ tự từ; "
+                "không đo chất lượng âm thanh hay độ chính xác phát âm."
             )
-        with gr.Tab("🧩 AI Tutor · Prompt"):
+        with gr.Tab("🧩 AI Tutor"):
             with gr.Row():
-                grammar_btn = gr.Button("📖 Tạo prompt Grammar")
-                vocab_btn = gr.Button("📚 Tạo prompt Vocabulary")
+                grammar_btn = gr.Button("📖 Phân tích Grammar", variant="primary")
+                vocab_btn = gr.Button("📚 Học Vocabulary", variant="primary")
             ai_out = gr.Markdown(
-                "Chọn câu trong transcript rồi tạo prompt. App tạo nội dung để sao chép vào trợ lý AI; "
-                "không gọi mô hình AI trực tiếp."
+                "Chọn câu trong transcript rồi yêu cầu Qwen giải thích bằng tiếng Việt. "
+                "Model được tải ở lần dùng đầu tiên."
             )
         with gr.Tab("🧠 Quiz"):
             quiz_btn = gr.Button("🎯 Tạo câu hỏi mới", variant="primary")
@@ -658,6 +862,10 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
                 language="json",
                 label="Transcript JSON của bài đang chọn",
                 lines=12,
+            )
+            download_transcript = gr.DownloadButton("⬇ Tải transcript JSON")
+            gr.Markdown(
+                "File tải về dùng transcript đang hiển thị, kể cả transcript đã nạp trong phiên này."
             )
         with gr.Tab("🎙️ WhisperX"):
             if find_spec("whisperx"):
@@ -711,6 +919,9 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
             whisperx_json = gr.Code(
                 language="json", label="Transcript JSON (timestamps câu và từ)", lines=16
             )
+            whisperx_import = gr.Button(
+                "📥 Dùng kết quả này cho bài đang chọn", variant="secondary"
+            )
             with gr.Row():
                 whisperx_json_file = gr.File(label="Tải JSON")
                 whisperx_srt_file = gr.File(label="Tải phụ đề SRT")
@@ -719,7 +930,8 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
     with gr.Row():
         file = gr.File(file_types=[".txt", ".srt", ".vtt", ".json"], type="filepath", label="TXT / SRT / VTT / JSON")
         text = gr.Textbox(label="Hoặc dán transcript", lines=4)
-    imp = gr.Button("👁️ Xem trước transcript")
+    imp = gr.Button("📥 Nạp transcript vào phiên này")
+    reset_import = gr.Button("↩ Khôi phục transcript thư viện")
     imp_status = gr.Markdown()
     gr.HTML(
         "<div class='footer-note'>Tiến độ được lưu riêng trong trình duyệt này · "
@@ -727,42 +939,142 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
     )
 
     search_box.change(search, [search_box, lesson], lesson)
-    lesson_outputs = [status, player, trans, parsed, lesson, url, progress_state, sentence_no, target]
-    lesson_change = lesson.change(select, [lesson, progress_state], lesson_outputs)
-    lesson_change.then(due_reviews, [lesson, progress_state], [due_summary, due_sentence])
-    lesson_change.then(lambda: [], None, quiz_history)
-    open_btn.click(select, [lesson, progress_state], lesson_outputs)
-    url_btn.click(open_url, [url, progress_state], lesson_outputs)
+    lesson_outputs = [
+        status, player, trans, parsed, lesson, url, progress_state, sentence_no,
+        target, transcript_override,
+    ]
+    lesson_change = lesson.change(
+        select, [lesson, progress_state, transcript_override], lesson_outputs
+    )
+    lesson_change.then(
+        due_reviews, [lesson, progress_state, transcript_override], [due_summary, due_sentence]
+    )
+    lesson_change.then(
+        lambda: ("", "", "", "", []),
+        None,
+        [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
+    )
+    open_btn.click(select, [lesson, progress_state, transcript_override], lesson_outputs)
+    url_btn.click(open_url, [url, progress_state, transcript_override], lesson_outputs)
     # Changing the dropdown triggers lesson.change, which loads the next lesson.
     prev.click(lambda value: move(value, -1), lesson, lesson)
     nxt.click(lambda value: move(value, 1), lesson, lesson)
     show.change(
-        lambda visible, vid: transcript_html(MAP.get(vid, {}).get("transcript", []))
+        lambda visible, vid, override: transcript_html(effective_segments(vid, override))
         if visible else '<div class="panel"><div class="empty">Script đang ẩn.</div></div>',
-        [show, lesson],
+        [show, lesson, transcript_override],
         trans,
     )
-    practice_btn.click(practice, [lesson, progress_state], practice_out)
+    practice_btn.click(
+        practice,
+        [lesson, progress_state, transcript_override],
+        [practice_out, sentence_no, target],
+    )
     practice_play.click(None, sentence_no, js="n => {window.EL?.playSentence(n); return []}")
-    sentence_no.change(sentence_for, [lesson, sentence_no], target)
-    mark_btn.click(mark_sentence, [lesson, sentence_no, progress_state], [mark_out, status, progress_state])
-    grammar_btn.click(grammar, [lesson, sentence_no], ai_out)
-    vocab_btn.click(vocab, [lesson, sentence_no], ai_out)
+    sentence_no.change(sentence_for, [lesson, sentence_no, transcript_override], target)
+    mark_btn.click(
+        mark_sentence,
+        [lesson, sentence_no, progress_state, transcript_override],
+        [mark_out, status, progress_state],
+    ).then(
+        practice,
+        [lesson, progress_state, transcript_override],
+        [practice_out, sentence_no, target],
+    )
+    grammar_btn.click(
+        grammar,
+        [lesson, sentence_no, transcript_override],
+        ai_out,
+        concurrency_id="ai-tutor",
+        concurrency_limit=1,
+        time_limit=1800,
+    )
+    vocab_btn.click(
+        vocab,
+        [lesson, sentence_no, transcript_override],
+        ai_out,
+        concurrency_id="ai-tutor",
+        concurrency_limit=1,
+        time_limit=1800,
+    )
     quiz_btn.click(
         quiz,
-        [lesson, quiz_history],
-        [quiz_out, quiz_state, quiz_answer, quiz_feedback, sentence_no, quiz_history],
+        [lesson, quiz_history, transcript_override],
+        [quiz_out, quiz_state, quiz_answer, quiz_feedback, sentence_no, target, quiz_history],
     )
     quiz_play_btn.click(None, sentence_no, js="n => {window.EL?.playSentence(n); return []}")
     quiz_check.click(check_quiz, [quiz_answer, quiz_state], quiz_feedback)
-    sr_btn.click(sr, [lesson, sentence_no, sr_score, progress_state], [sr_out, progress_state]).then(
-        due_reviews, [lesson, progress_state], [due_summary, due_sentence]
+    sr_btn.click(
+        sr,
+        [lesson, sentence_no, sr_score, progress_state, transcript_override],
+        [sr_out, progress_state],
+    ).then(
+        due_reviews,
+        [lesson, progress_state, transcript_override],
+        [due_summary, due_sentence],
     )
-    due_refresh.click(due_reviews, [lesson, progress_state], [due_summary, due_sentence])
-    use_due_btn.click(use_due_sentence, [due_sentence, lesson], [sentence_no, target])
+    due_refresh.click(
+        due_reviews,
+        [lesson, progress_state, transcript_override],
+        [due_summary, due_sentence],
+    )
+    use_due_btn.click(
+        use_due_sentence,
+        [due_sentence, lesson, transcript_override],
+        [sentence_no, target],
+    )
     due_play_btn.click(None, sentence_no, js="n => {window.EL?.playSentence(n); return []}")
     pron_btn.click(pron_score, [target, spoken], pron_out)
-    imp.click(import_transcript, [file, text, lesson], [imp_status, parsed, trans])
+    speech_btn.click(
+        speech_to_text_ui,
+        [speech_audio, speech_model, speech_language],
+        [spoken, speech_status],
+        concurrency_id="whisperx-job",
+        concurrency_limit=1,
+        time_limit=1800,
+    )
+    imp.click(
+        import_transcript,
+        [file, text, lesson, progress_state, transcript_override],
+        [imp_status, parsed, trans, transcript_override, status, target, sentence_no],
+    ).then(
+        due_reviews,
+        [lesson, progress_state, transcript_override],
+        [due_summary, due_sentence],
+    ).then(
+        lambda: ("", "", "", "", []),
+        None,
+        [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
+    )
+    reset_import.click(
+        restore_library_transcript,
+        [lesson, progress_state],
+        [imp_status, parsed, trans, transcript_override, status, target, sentence_no],
+    ).then(
+        due_reviews,
+        [lesson, progress_state, transcript_override],
+        [due_summary, due_sentence],
+    ).then(
+        lambda: ("", "", "", "", []),
+        None,
+        [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
+    )
+    whisperx_import.click(
+        import_transcript_text,
+        [whisperx_json, lesson, progress_state, transcript_override],
+        [imp_status, parsed, trans, transcript_override, status, target, sentence_no],
+    ).then(
+        due_reviews,
+        [lesson, progress_state, transcript_override],
+        [due_summary, due_sentence],
+    ).then(
+        lambda: ("", "", "", "", []),
+        None,
+        [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
+    )
+    download_transcript.click(
+        export_transcript, [lesson, transcript_override], download_transcript
+    )
     whisperx_run.click(
         run_whisperx_ui,
         [
@@ -782,6 +1094,11 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
     )
     progress_state.change(progress_stat, progress_state, progress_stat_out)
     demo.load(progress_stat, progress_state, progress_stat_out)
+    demo.load(
+        due_reviews,
+        [lesson, progress_state, transcript_override],
+        [due_summary, due_sentence],
+    )
 
     play.click(None, js="() => {window.EL?.play(); return []}")
     repeat_sentence.click(None, js="() => {window.EL?.repeat(); return []}")

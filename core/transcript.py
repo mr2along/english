@@ -56,7 +56,13 @@ def _json_segments(data: Any, video_id: str | None = None) -> Any:
         video = next(
             (item for item in videos if isinstance(item, dict) and item.get("video_id") == video_id),
             None,
-        ) if video_id else (videos[0] if len(videos) == 1 else None)
+        ) if video_id else None
+        if video is None and len(videos) == 1:
+            only_video = videos[0]
+            if isinstance(only_video, dict) and not only_video.get("video_id"):
+                video = only_video
+            elif not video_id:
+                video = only_video
         if not isinstance(video, dict):
             return []
         return video.get("segments") or video.get("transcript") or []
@@ -152,14 +158,36 @@ def normalize(raw: Any) -> list[dict[str, Any]]:
             duration = 0.0
         if not math.isfinite(duration) or duration < 0:
             duration = 0.0
-        out.append(
-            {
-                "index": len(out),
-                "start": start,
-                "duration": duration,
-                "text": text,
-            }
-        )
+        segment = {
+            "index": len(out),
+            "start": start,
+            "duration": duration,
+            "text": text,
+        }
+        words = item.get("words")
+        if isinstance(words, list):
+            aligned_words = []
+            for word in words:
+                if not isinstance(word, dict):
+                    continue
+                token = _clean_caption(str(word.get("word") or ""))
+                try:
+                    word_start = float(word.get("start"))
+                    word_end = float(word.get("end", word_start))
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    token
+                    and math.isfinite(word_start)
+                    and math.isfinite(word_end)
+                    and 0 <= word_start <= word_end
+                ):
+                    aligned_words.append(
+                        {"word": token, "start": word_start, "end": word_end}
+                    )
+            if aligned_words:
+                segment["words"] = aligned_words
+        out.append(segment)
     for index in range(len(out) - 1):
         if not out[index]["duration"]:
             out[index]["duration"] = max(0.0, out[index + 1]["start"] - out[index]["start"])
