@@ -2,7 +2,7 @@ import json
 import math
 import os
 import re
-from typing import Dict, List
+from typing import Callable, Dict, List
 
 _MODEL = None
 _TOKENIZER = None
@@ -75,12 +75,12 @@ def _make(parts: List[Dict]) -> Dict:
     return {"start": round(start, 3), "end": round(max(end, start + 0.05), 3), "text": text}
 
 
-def _qwen_boundaries(raw: List[Dict]) -> List[int]:
+def _qwen_boundaries(raw: List[Dict], language: str = "English") -> List[int]:
     if not raw:
         return []
     tokenizer, model = _load_model()
     numbered = "\n".join(f'{i}: {x["text"]}' for i, x in enumerate(raw))
-    prompt = ("Split these transcript fragments into natural spoken English sentences. "
+    prompt = (f"Split these transcript fragments into natural spoken {language} sentences. "
               "Return ONLY a JSON array of integer fragment indexes where a sentence ENDS. "
               "Do not rewrite words, do not add punctuation, and do not change order. "
               "Every fragment must belong to exactly one sentence.\n\n" + numbered)
@@ -113,6 +113,45 @@ def map_segments(raw: List[Dict]) -> List[Dict]:
         return out
     except Exception:
         return _fallback(raw)
+
+
+def map_segments_detailed(
+    raw: List[Dict],
+    language: str = "English",
+    batch_size: int = 48,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> tuple[List[Dict], Dict[str, int]]:
+    """Align caption fragments into sentences and report which batches used Qwen."""
+    if not raw:
+        return [], {"ai_batches": 0, "fallback_batches": 0}
+
+    size = max(8, min(int(batch_size), 96))
+    output: List[Dict] = []
+    ai_batches = fallback_batches = 0
+    for offset in range(0, len(raw), size):
+        batch = raw[offset : offset + size]
+        try:
+            boundaries = _qwen_boundaries(batch, language=language)
+            start = 0
+            mapped = []
+            for end_index in boundaries:
+                if end_index < start:
+                    continue
+                mapped.append(_make(batch[start : end_index + 1]))
+                start = end_index + 1
+            if start < len(batch):
+                mapped.append(_make(batch[start:]))
+            if not mapped:
+                raise ValueError("Qwen returned no sentences")
+            output.extend(mapped)
+            ai_batches += 1
+        except Exception:
+            output.extend(_fallback(batch))
+            fallback_batches += 1
+        if progress_callback:
+            completed = min(1.0, (offset + len(batch)) / len(raw))
+            progress_callback(completed, f"AI phân câu: {offset + len(batch):,}/{len(raw):,} caption")
+    return output, {"ai_batches": ai_batches, "fallback_batches": fallback_batches}
 
 
 def map_video(video: Dict) -> Dict:

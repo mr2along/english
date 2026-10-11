@@ -25,7 +25,9 @@ from core.learning_engine import make_practice_items
 from core.library import load, video_id
 from core.practice import make_quiz
 from core.progress import ProgressStore
-from core.transcript import format_time, parse_manual, to_json
+from core.transcript import format_time, normalize, parse_manual, to_json
+from core.qwen_mapper import map_segments_detailed
+from core.youtube_transcript import fetch_youtube_transcript, transcribe_youtube_audio
 from core.whisperx_runner import (
     SUPPORTED_AUDIO_SUFFIXES,
     YOUTUBE_ID_RE,
@@ -51,9 +53,33 @@ def choices() -> list[tuple[str, str]]:
     ]
 
 
+def session_video(vid: str | None, transcript_override: Any = None):
+    """Return library metadata or metadata for this browser session's imported lesson."""
+    base = MAP.get(vid)
+    if not (
+        isinstance(transcript_override, dict)
+        and transcript_override.get("video_id") == vid
+        and isinstance(transcript_override.get("segments"), list)
+    ):
+        return base
+    merged = dict(base or {})
+    merged.update(transcript_override)
+    merged.setdefault("title", (base or {}).get("title") or f"YouTube · {vid}")
+    merged.setdefault("language", (base or {}).get("language") or "en")
+    return merged
+
+
+def lesson_choices(vid: str | None = None, transcript_override: Any = None):
+    options = choices()
+    video = session_video(vid, transcript_override)
+    if vid and vid not in MAP and video:
+        options.append((f"🌐 {video.get('title', vid)} · {vid}", vid))
+    return options
+
+
 def yt(vid: str | None) -> str:
     valid_id = video_id(vid or "")
-    if not valid_id or valid_id not in MAP:
+    if not valid_id:
         return '<div class="empty">Chưa chọn video.</div>'
     safe_id = html.escape(valid_id, quote=True)
     url_id = quote(valid_id, safe="")
@@ -121,7 +147,7 @@ def progress_stat(progress_data: Any = None) -> str:
 def lesson_status(
     vid: str | None, progress_data: Any = None, transcript_override: Any = None
 ) -> str:
-    video = MAP.get(vid)
+    video = session_video(vid, transcript_override)
     if not video:
         return "Chưa chọn bài học."
     segments = effective_segments(vid, transcript_override)
@@ -133,16 +159,22 @@ def lesson_status(
     )
     percent = round(done / len(segments) * 100) if segments else 0
     title = html.escape(str(video.get("title", vid)))
-    source = html.escape(
-        "session_import" if transcript_override else video.get("transcript_source", "final_transcript")
+    source = html.escape(str(video.get("transcript_source", "final_transcript")))
+    alignment = html.escape(str(video.get("alignment", "final_alignment")))
+    is_session_override = (
+        isinstance(transcript_override, dict)
+        and transcript_override.get("video_id") == vid
+        and isinstance(transcript_override.get("segments"), list)
     )
-    alignment = html.escape(
-        "user_imported" if transcript_override else video.get("alignment", "final_alignment")
+    raw_count = (
+        int(video.get("raw_segment_count", len(segments)))
+        if is_session_override
+        else len(video.get("raw_transcript", segments))
     )
-    raw_count = len(segments) if transcript_override else len(video.get("raw_transcript", segments))
+    position = f"{video['position']} · " if video.get("position") else ""
     return (
-        f"### 🎯 {video.get('position', '')} · {title}\n"
-        f"`{vid}` · {video.get('language', 'en')} · **{len(segments):,} câu** · **{percent}% đã luyện**\n\n"
+        f"### 🎯 {position}{title}\n"
+        f"`{vid}` · {video.get('language_code', video.get('language', 'en'))} · **{len(segments):,} câu** · **{percent}% đã luyện**\n\n"
         f"📦 Source: `{source}` · 🔗 Alignment: `{alignment}` · Raw: {raw_count:,}"
     )
 
@@ -178,7 +210,8 @@ def progress_scope(vid: str | None, transcript_override: Any = None) -> str | No
 
 
 def select(vid: str | None, progress_data: Any = None, transcript_override: Any = None):
-    if vid not in MAP:
+    video = session_video(vid, transcript_override)
+    if not video:
         return (
             "❌ Không tìm thấy bài học.",
             yt(None),
@@ -192,19 +225,23 @@ def select(vid: str | None, progress_data: Any = None, transcript_override: Any 
             None,
         )
     store = _store(progress_data)
-    video = MAP[vid]
     active_override = (
         transcript_override
         if isinstance(transcript_override, dict) and transcript_override.get("video_id") == vid
         else None
     )
     segments = effective_segments(vid, active_override)
+    lesson_value = (
+        gr.update(choices=lesson_choices(vid, active_override), value=vid)
+        if vid not in MAP
+        else vid
+    )
     return (
         lesson_status(vid, store.data, active_override),
         yt(vid),
         transcript_html(segments),
         to_json(segments),
-        vid,
+        lesson_value,
         f"https://www.youtube.com/watch?v={vid}",
         store.data,
         0,
@@ -215,10 +252,10 @@ def select(vid: str | None, progress_data: Any = None, transcript_override: Any 
 
 def open_url(value: str | None, progress_data: Any = None, transcript_override: Any = None):
     vid = video_id(value or "")
-    if vid in MAP:
+    if session_video(vid, transcript_override):
         return select(vid, progress_data, transcript_override)
     return (
-        "❌ URL/Video ID không có trong thư viện bài học.",
+        "❌ Video chưa có trong thư viện. Mở tab **YouTube online + AI** để lấy phụ đề cho video này.",
         yt(None),
         transcript_html([]),
         "[]",
@@ -231,11 +268,11 @@ def open_url(value: str | None, progress_data: Any = None, transcript_override: 
     )
 
 
-def search(query: str | None, current: str | None):
+def search(query: str | None, current: str | None, transcript_override: Any = None):
     query = (query or "").strip().casefold()
     matches = [
         item
-        for item in choices()
+        for item in lesson_choices(current, transcript_override)
         if not query or query in f"{item[0]} {item[1]}".casefold()
     ]
     values = {value for _, value in matches}
@@ -272,7 +309,7 @@ def mark_sentence(
     progress_data: Any = None,
     transcript_override: Any = None,
 ):
-    if vid not in MAP:
+    if not session_video(vid, transcript_override):
         return "Chưa chọn bài.", "Chưa chọn bài học.", progress_data or EMPTY_PROGRESS
     segments = effective_segments(vid, transcript_override)
     try:
@@ -293,7 +330,7 @@ def mark_sentence(
 
 
 def practice(vid: str | None, progress_data: Any = None, transcript_override: Any = None):
-    video = MAP.get(vid)
+    video = session_video(vid, transcript_override)
     if not video:
         return "Chưa chọn bài.", 0, ""
     items = make_practice_items(effective_segments(vid, transcript_override))
@@ -421,7 +458,7 @@ def sr(
     progress_data: Any = None,
     transcript_override: Any = None,
 ):
-    if vid not in MAP:
+    if not session_video(vid, transcript_override):
         return "Chưa chọn bài.", progress_data or EMPTY_PROGRESS
     segments = effective_segments(vid, transcript_override)
     try:
@@ -442,7 +479,7 @@ def sr(
 
 
 def due_reviews(vid: str | None, progress_data: Any = None, transcript_override: Any = None):
-    if vid not in MAP:
+    if not session_video(vid, transcript_override):
         return "Chưa chọn bài học.", gr.update(choices=[], value=None)
     store = _store(progress_data)
     scope = progress_scope(vid, transcript_override)
@@ -454,7 +491,7 @@ def due_reviews(vid: str | None, progress_data: Any = None, transcript_override:
     choices_for_due = []
     for item in due:
         index = item.get("segment_index")
-        if not isinstance(index, int) or vid not in MAP:
+        if not isinstance(index, int):
             continue
         segments = effective_segments(vid, transcript_override)
         if not 0 <= index < len(segments):
@@ -554,8 +591,8 @@ def import_transcript(
     transcript_override: Any = None,
 ):
     unchanged = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
-    if vid not in MAP:
-        return "❌ Hãy chọn bài học trong thư viện trước khi nạp transcript.", *unchanged
+    if not session_video(vid, transcript_override):
+        return "❌ Hãy chọn bài học hoặc lấy transcript YouTube trước.", *unchanged
     raw = text or ""
     if file:
         try:
@@ -566,7 +603,17 @@ def import_transcript(
         segments = parse_manual(raw, video_id=vid)
         if not segments:
             return "❌ Không tìm thấy câu có timestamp trong transcript.", *unchanged
-        imported = {"video_id": vid, "segments": segments}
+        previous = session_video(vid, transcript_override) or {}
+        imported = {
+            "video_id": vid,
+            "title": previous.get("title") or MAP.get(vid, {}).get("title") or f"YouTube · {vid}",
+            "language": previous.get("language", "en"),
+            "language_code": previous.get("language_code", "en"),
+            "transcript_source": "session_import",
+            "alignment": "user_imported",
+            "raw_segment_count": len(segments),
+            "segments": segments,
+        }
         message = (
             f"✅ Đã nạp {len(segments):,} câu vào phiên hiện tại. "
             "Bài luyện dùng transcript này trong phiên này; thư viện đã deploy không bị thay đổi."
@@ -593,6 +640,121 @@ def import_transcript_text(
     return import_transcript(None, text, vid, progress_data, transcript_override)
 
 
+def fetch_youtube_online(
+    value: str | None,
+    mode: str,
+    language: str,
+    model_name: str,
+    progress_data: Any = None,
+    transcript_override: Any = None,
+    progress=gr.Progress(track_tqdm=True),
+):
+    unchanged = tuple(gr.update() for _ in range(10))
+    try:
+        if mode == "whisperx":
+            progress(0.03, desc="Đang chuẩn bị audio YouTube tạm thời")
+
+            def whisper_progress(fraction, description):
+                if "chép lời" in description.lower():
+                    progress(0.58, desc=description)
+                else:
+                    progress(0.03 + min(1.0, max(0.0, fraction)) * 0.5, desc=description)
+
+            fetched = transcribe_youtube_audio(
+                value or "",
+                model_name=model_name or "small",
+                language=language or "auto",
+                progress_callback=whisper_progress,
+            )
+            segments = normalize(fetched.get("segments", []))
+            if not segments:
+                raise ValueError("WhisperX không tạo được câu có timestamp.")
+            video_id = fetched["video_id"]
+            imported = {
+                "video_id": video_id,
+                "title": fetched.get("title") or f"YouTube · {video_id}",
+                "language": fetched.get("language") or language,
+                "language_code": fetched.get("language") or language,
+                "transcript_source": "youtube_whisperx",
+                "alignment": "whisperx_word_alignment",
+                "raw_segment_count": len(segments),
+                "segments": segments,
+            }
+            message = (
+                f"✅ WhisperX đã chép lời và căn timestamp cho {len(segments):,} câu "
+                f"({fetched.get('language', 'auto')}, model `{fetched.get('model', model_name)}`). "
+                "Audio tạm đã bị xóa; transcript dùng trong phiên này."
+            )
+        else:
+            progress(0.03, desc="Đang lấy phụ đề từ YouTube")
+            fetched = fetch_youtube_transcript(value or "", language or "en")
+            raw = normalize(fetched.get("segments", []))
+            if not raw:
+                raise ValueError("Track phụ đề không có caption dùng được.")
+
+            language_names = {
+                "en": "English",
+                "vi": "Vietnamese",
+                "es": "Spanish",
+                "fr": "French",
+                "de": "German",
+                "ja": "Japanese",
+                "ko": "Korean",
+                "zh": "Chinese",
+            }
+            language_name = (
+                language_names.get(fetched.get("language_code"))
+                or fetched.get("language")
+                or language_names.get(language, "the original language")
+            )
+            progress(0.12, desc=f"Đã lấy {len(raw):,} caption · đang căn câu bằng Qwen")
+            mapped, mapping = map_segments_detailed(
+                raw,
+                language=language_name,
+                progress_callback=lambda fraction, description: progress(
+                    0.12 + fraction * 0.86, desc=description
+                ),
+            )
+            segments = normalize(mapped)
+            if not segments:
+                raise ValueError("Không tạo được câu có timestamp từ caption.")
+
+            video_id = fetched["video_id"]
+            imported = {
+                "video_id": video_id,
+                "title": fetched.get("title") or f"YouTube · {video_id}",
+                "language": fetched.get("language") or language_name,
+                "language_code": fetched.get("language_code") or language,
+                "transcript_source": "youtube_online_captions",
+                "alignment": "qwen_sentence_grouping",
+                "raw_segment_count": len(raw),
+                "caption_generated": fetched.get("is_generated", False),
+                "ai_batches": mapping["ai_batches"],
+                "fallback_batches": mapping["fallback_batches"],
+                "segments": segments,
+            }
+            caption_type = "phụ đề tự động" if imported["caption_generated"] else "phụ đề do người tạo"
+            if mapping["ai_batches"] and mapping["fallback_batches"]:
+                ai_message = (
+                    f"Qwen căn câu ở {mapping['ai_batches']} lô; "
+                    f"{mapping['fallback_batches']} lô dùng cách gom dự phòng."
+                )
+            elif mapping["ai_batches"]:
+                ai_message = f"Qwen đã căn câu ở {mapping['ai_batches']} lô."
+            else:
+                ai_message = "Qwen chưa chạy được; transcript dùng cách gom dự phòng theo dấu câu và khoảng nghỉ."
+            message = (
+                f"✅ Đã lấy {len(raw):,} caption ({caption_type}), căn thành {len(segments):,} câu. "
+                f"{ai_message} Đã nạp vào phiên hiện tại; dữ liệu thư viện không bị thay đổi."
+            )
+
+        selected = select(video_id, progress_data, imported)
+        progress(1.0, desc="Hoàn tất")
+        return (message, *selected)
+    except Exception as error:
+        return (f"❌ {html.escape(str(error))}", *unchanged)
+
+
 def restore_library_transcript(vid: str | None, progress_data: Any = None):
     if vid not in MAP:
         return (
@@ -612,7 +774,7 @@ def restore_library_transcript(vid: str | None, progress_data: Any = None):
 
 
 def export_transcript(vid: str | None, transcript_override: Any = None) -> str:
-    if vid not in MAP:
+    if not session_video(vid, transcript_override):
         raise ValueError("Hãy chọn bài học trước khi tải transcript.")
     segments = effective_segments(vid, transcript_override)
     output_dir = Path(tempfile.gettempdir()) / "english-lab-exports"
@@ -697,11 +859,13 @@ body{background:#f8fafc}
 .repeat-choice.selected button{background:#2563eb!important;color:#fff!important;border-color:#2563eb!important}
 .whisperx-id-row{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .whisperx-id-row>*{min-width:0}
+.online-fetch-row{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.online-fetch-row>*{min-width:0}
 .whisperx-control-row{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .whisperx-control-row>*{min-width:0}
 @media(max-width:900px){.gradio-container{padding:12px!important}.hero{padding:22px}.hero h1{font-size:29px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.lines{max-height:480px}}
-@media(max-width:900px){.whisperx-control-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:600px){.gradio-container{padding:8px!important}.hero{padding:17px;border-radius:18px}.hero h1{font-size:24px}.hero .sub{font-size:13px}.stats{gap:8px}.stat{padding:12px;border-radius:14px}.num{font-size:20px}.line{gap:8px;padding:10px 8px}.time{flex-basis:54px;font-size:11px}.panel-title{padding:12px}.repeat-bar{gap:6px;padding:8px}.repeat-choice button{min-width:42px}.video{border-radius:12px 12px 0 0}.whisperx-control-row{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:900px){.whisperx-control-row,.online-fetch-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.gradio-container{padding:8px!important}.hero{padding:17px;border-radius:18px}.hero h1{font-size:24px}.hero .sub{font-size:13px}.stats{gap:8px}.stat{padding:12px;border-radius:14px}.num{font-size:20px}.line{gap:8px;padding:10px 8px}.time{flex-basis:54px;font-size:11px}.panel-title{padding:12px}.repeat-bar{gap:6px;padding:8px}.repeat-choice button{min-width:42px}.video{border-radius:12px 12px 0 0}.whisperx-control-row,.online-fetch-row{grid-template-columns:minmax(0,1fr)}}
 """
 
 
@@ -799,6 +963,46 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
         )
 
     with gr.Tabs():
+        with gr.Tab("🌐 YouTube online + AI"):
+            gr.Markdown(
+                "Dán URL/Video ID vào ô **YouTube URL / Video ID** phía trên. "
+                "Chọn lấy phụ đề có sẵn rồi để Qwen gom caption thành câu, hoặc chạy WhisperX "
+                "để AI chép lời trực tiếp từ audio. Chế độ WhisperX chỉ tải audio tạm thời "
+                "và xóa file sau khi nhận dạng xong."
+            )
+            online_mode = gr.Radio(
+                [
+                    ("Caption YouTube + Qwen", "captions"),
+                    ("WhisperX chép audio YouTube", "whisperx"),
+                ],
+                value="captions",
+                label="Cách tạo transcript",
+            )
+            with gr.Row(elem_classes="online-fetch-row"):
+                online_language = gr.Dropdown(
+                    [
+                        ("English", "en"),
+                        ("Vietnamese", "vi"),
+                        ("Español", "es"),
+                        ("Français", "fr"),
+                        ("Deutsch", "de"),
+                        ("日本語", "ja"),
+                        ("한국어", "ko"),
+                        ("中文", "zh"),
+                        ("Tự chọn track có sẵn", "auto"),
+                    ],
+                    value="en",
+                    label="Ngôn ngữ",
+                )
+                online_model = gr.Dropdown(
+                    ["tiny", "base", "small", "medium"],
+                    value="small",
+                    label="Model WhisperX",
+                )
+                online_fetch_btn = gr.Button(
+                    "✨ Lấy transcript YouTube + AI", variant="primary"
+                )
+            online_status = gr.Markdown()
         with gr.Tab("🎧 Listening / Shadowing"):
             practice_out = gr.Markdown()
             practice_btn = gr.Button("🚀 Chuẩn bị luyện tập", variant="primary")
@@ -935,10 +1139,10 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
     imp_status = gr.Markdown()
     gr.HTML(
         "<div class='footer-note'>Tiến độ được lưu riêng trong trình duyệt này · "
-        "Transcript có sẵn trong thư viện · Space không tải audio YouTube</div>"
+        "Caption công khai hoặc audio tạm cho WhisperX · file audio được xóa sau khi xử lý</div>"
     )
 
-    search_box.change(search, [search_box, lesson], lesson)
+    search_box.change(search, [search_box, lesson, transcript_override], lesson)
     lesson_outputs = [
         status, player, trans, parsed, lesson, url, progress_state, sentence_no,
         target, transcript_override,
@@ -956,6 +1160,22 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
     )
     open_btn.click(select, [lesson, progress_state, transcript_override], lesson_outputs)
     url_btn.click(open_url, [url, progress_state, transcript_override], lesson_outputs)
+    online_fetch_btn.click(
+        fetch_youtube_online,
+        [url, online_mode, online_language, online_model, progress_state, transcript_override],
+        [online_status, *lesson_outputs],
+        concurrency_id="ai-tutor",
+        concurrency_limit=1,
+        time_limit=1800,
+    ).then(
+        due_reviews,
+        [lesson, progress_state, transcript_override],
+        [due_summary, due_sentence],
+    ).then(
+        lambda: ("", "", "", "", []),
+        None,
+        [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
+    )
     # Changing the dropdown triggers lesson.change, which loads the next lesson.
     prev.click(lambda value: move(value, -1), lesson, lesson)
     nxt.click(lambda value: move(value, 1), lesson, lesson)
