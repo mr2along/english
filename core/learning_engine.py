@@ -13,19 +13,59 @@ class ReviewItem:
 
 
 def make_practice_items(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [{"index": i + 1, "text": s.get("text", ""), "start": float(s.get("start", 0)), "duration": float(s.get("duration", 0))} for i, s in enumerate(segments) if s.get("text")]
+    items = []
+    for index, segment in enumerate(segments or []):
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
+        try:
+            start = max(0.0, float(segment.get("start", 0) or 0))
+            duration = max(0.0, float(segment.get("duration", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        items.append(
+            {
+                "index": index,
+                "text": text,
+                "start": start,
+                "duration": duration,
+                "end": start + duration,
+            }
+        )
+    return items
 
 
 def build_quiz(segment: Dict[str, Any], distractors: List[str] | None = None) -> Dict[str, Any]:
-    text = str(segment.get("text", "")).strip()
+    text = str((segment or {}).get("text", "")).strip()
     words = text.split()
-    answer = words[0] if words else ""
-    choices = [answer] + [x for x in (distractors or []) if x and x != answer][:3]
-    return {"question": "Từ nào bắt đầu câu này?", "answer": answer, "choices": choices, "text": text}
+    if not words:
+        return {"type": "unavailable", "question": "Câu này chưa có nội dung.", "answer": "", "choices": [], "text": ""}
+    answer = words[0]
+    options = list(dict.fromkeys([answer] + [str(value) for value in (distractors or []) if value and str(value) != answer]))[:4]
+    if len(options) > 1:
+        return {
+            "type": "multiple_choice",
+            "question": "Từ nào bắt đầu câu này?",
+            "answer": answer,
+            "choices": options,
+            "text": text,
+        }
+    return {
+        "type": "fill_blank",
+        "question": "____ " + " ".join(words[1:]),
+        "answer": answer,
+        "choices": [],
+        "text": text,
+    }
 
 
 def next_review(item: ReviewItem, quality: int) -> ReviewItem:
-    quality = max(0, min(5, int(quality)))
+    try:
+        quality = max(0, min(5, int(quality)))
+    except (TypeError, ValueError):
+        quality = 0
     if quality < 3:
         item.repetitions = 0
         item.interval = 1

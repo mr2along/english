@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 from typing import Dict, List
@@ -21,9 +22,28 @@ def _load_model():
 def _fallback(raw: List[Dict]) -> List[Dict]:
     out, buf = [], []
     for item in raw:
+        if not isinstance(item, dict) or not str(item.get("text", "")).strip():
+            continue
+        try:
+            start = float(item.get("start", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= start < float("inf"):
+            continue
+        item = dict(item, start=start)
         buf.append(item)
         text = " ".join(x["text"] for x in buf).strip()
-        pause = (item["start"] - buf[-2]["start"]) if len(buf) > 1 else 0
+        previous = buf[-2] if len(buf) > 1 else None
+        if previous:
+            try:
+                previous_end = float(previous["start"]) + max(
+                    0.0, float(previous.get("duration", 0) or 0)
+                )
+            except (TypeError, ValueError):
+                previous_end = float(previous["start"])
+        else:
+            previous_end = start
+        pause = max(0.0, start - previous_end) if previous else 0.0
         if re.search(r"[.!?][\"']?$", text) or len(text.split()) >= 18 or pause >= 1.1:
             out.append(_make(buf)); buf = []
     if buf: out.append(_make(buf))
@@ -31,14 +51,33 @@ def _fallback(raw: List[Dict]) -> List[Dict]:
 
 
 def _make(parts: List[Dict]) -> Dict:
-    start = float(parts[0]["start"])
+    if not parts:
+        return {"start": 0.0, "end": 0.05, "text": ""}
+    try:
+        start = max(0.0, float(parts[0].get("start", 0) or 0))
+    except (TypeError, ValueError):
+        start = 0.0
     last = parts[-1]
-    end = float(last["start"]) + float(last.get("duration", 0) or 0)
-    if end <= start and len(parts) > 1: end = float(parts[-1]["start"])
-    return {"start": round(start, 3), "end": round(max(end, start + 0.05), 3), "text": " ".join(x["text"] for x in parts).strip()}
+    try:
+        last_start = max(start, float(last.get("start", start) or start))
+        duration = max(0.0, float(last.get("duration", 0) or 0))
+    except (TypeError, ValueError):
+        last_start, duration = start, 0.0
+    end = last_start + duration
+    if end <= start and len(parts) > 1:
+        try:
+            end = float(parts[-1].get("start", start))
+        except (TypeError, ValueError):
+            end = start
+    if not math.isfinite(end):
+        end = start
+    text = " ".join(str(item.get("text", "")).strip() for item in parts).strip()
+    return {"start": round(start, 3), "end": round(max(end, start + 0.05), 3), "text": text}
 
 
 def _qwen_boundaries(raw: List[Dict]) -> List[int]:
+    if not raw:
+        return []
     tokenizer, model = _load_model()
     numbered = "\n".join(f'{i}: {x["text"]}' for i, x in enumerate(raw))
     prompt = ("Split these transcript fragments into natural spoken English sentences. "
@@ -55,7 +94,10 @@ def _qwen_boundaries(raw: List[Dict]) -> List[int]:
     if not match: raise ValueError("Qwen did not return a JSON boundary list")
     values = json.loads(match.group(0))
     if not isinstance(values, list) or not all(isinstance(x, int) for x in values): raise ValueError("Invalid Qwen boundary list")
-    return sorted(set(x for x in values if 0 <= x < len(raw)))
+    boundaries = sorted(set(x for x in values if 0 <= x < len(raw)))
+    if not boundaries:
+        raise ValueError("Qwen returned no sentence boundaries")
+    return boundaries
 
 
 def map_segments(raw: List[Dict]) -> List[Dict]:

@@ -1,4 +1,4 @@
-import html, json, re
+import html, json, math, re
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
@@ -12,8 +12,14 @@ def video_id(value):
     if re.fullmatch(r"[A-Za-z0-9_-]{11}", value): return value
     try:
         p=urlparse(value); host=(p.hostname or "").lower()
-        if host in {"youtu.be","www.youtu.be"}:
+        if host in {"youtu.be", "www.youtu.be"}:
             x=p.path.strip("/").split("/")[0]; return x if re.fullmatch(r"[A-Za-z0-9_-]{11}",x) else None
+        youtube_hosts = {
+            "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+            "youtube-nocookie.com", "www.youtube-nocookie.com",
+        }
+        if host not in youtube_hosts:
+            return None
         x=parse_qs(p.query).get("v",[None])[0]
         if x and re.fullmatch(r"[A-Za-z0-9_-]{11}",x): return x
         parts=[x for x in p.path.split("/") if x]
@@ -26,16 +32,20 @@ def clean(value):
 
 def segments(raw):
     out=[]
+    if not isinstance(raw, list):
+        return out
     for item in raw or []:
         if not isinstance(item,dict): continue
         text=clean(item.get("text") or item.get("utf8") or item.get("content"))
         try: start=float(item.get("start",item.get("start_time",0)) or 0)
         except (TypeError,ValueError): continue
+        if not math.isfinite(start) or start < 0: continue
         try:
             if item.get("end") is not None or item.get("end_time") is not None:
                 end=float(item.get("end",item.get("end_time")) or start); duration=max(0,end-start)
             else: duration=float(item.get("duration",0) or 0)
         except (TypeError,ValueError): duration=0.0
+        if not math.isfinite(duration) or duration < 0: duration=0.0
         if text:
             x={"index":len(out)+1,"start":start,"duration":duration,"text":text}
             words=item.get("words")
@@ -45,6 +55,7 @@ def segments(raw):
                     if not isinstance(w,dict) or not w.get("word"): continue
                     try: ws=float(w.get("start",0) or 0); we=float(w.get("end",ws) or ws)
                     except (TypeError,ValueError): continue
+                    if not math.isfinite(ws) or not math.isfinite(we) or ws < 0 or we < ws: continue
                     ww.append({"word":clean(w.get("word")),"start":ws,"end":we})
                 if ww: x["words"]=ww
             out.append(x)
@@ -54,12 +65,21 @@ def segments(raw):
 
 def validate(data):
     if not isinstance(data,dict) or not isinstance(data.get("videos"),list) or not data.get("videos"): raise ValueError("Transcript library is empty or invalid")
-    videos=[]
+    videos=[]; seen=set()
     for v in data["videos"]:
         if not isinstance(v,dict) or not v.get("video_id"): continue
-        x=dict(v); x["video_id"]=str(x["video_id"]); x["title"]=clean(x.get("title") or x["video_id"])
+        x=dict(v); x["video_id"]=str(x["video_id"]).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", x["video_id"]): continue
+        if x["video_id"] in seen: raise ValueError(f"Duplicate video id: {x['video_id']}")
+        seen.add(x["video_id"])
+        x["title"]=clean(x.get("title") or x["video_id"])
         source=x.get("segments") if isinstance(x.get("segments"),list) else x.get("transcript")
-        x["transcript"]=segments(source); x["transcript_source"]=x.get("transcript_source") or "final_transcript"; x["alignment"]=x.get("alignment") or "final_alignment"; x["raw_transcript"]=list(x["transcript"]); videos.append(x)
+        x["transcript"]=segments(source)
+        x["transcript_source"]=x.get("transcript_source") or "final_transcript"
+        x["alignment"]=x.get("alignment") or "final_alignment"
+        x["raw_transcript"]=list(x["transcript"])
+        x.setdefault("position", len(videos) + 1)
+        videos.append(x)
     if not videos: raise ValueError("Transcript library contains no valid videos")
     data["videos"]=videos; return data
 
