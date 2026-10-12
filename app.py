@@ -27,6 +27,7 @@ from core.practice import make_quiz
 from core.progress import ProgressStore
 from core.transcript import format_time, normalize, parse_manual, to_json
 from core.qwen_mapper import map_segments_detailed
+from core.youtube_download import download_youtube_video
 from core.youtube_transcript import fetch_youtube_transcript, transcribe_youtube_audio
 from core.whisperx_runner import (
     SUPPORTED_AUDIO_SUFFIXES,
@@ -777,6 +778,25 @@ def fetch_youtube_online(
         return (f"❌ {html.escape(str(error))}", *unchanged)
 
 
+def download_youtube_ui(value: str | None, progress=gr.Progress(track_tqdm=True)):
+    try:
+        result = download_youtube_video(
+            value or "",
+            progress_callback=lambda fraction, description: progress(
+                fraction, desc=description
+            ),
+        )
+        size_mb = result["size_bytes"] / (1024 * 1024)
+        title = html.escape(result["title"])
+        message = (
+            f"✅ Đã tải **{title}** · {format_time(result['duration'])} · "
+            f"{size_mb:.1f} MB. Link tải có hiệu lực khoảng 5 phút."
+        )
+        return message, result["path"]
+    except Exception as error:
+        return f"❌ {html.escape(str(error))}", None
+
+
 def restore_library_transcript(vid: str | None, progress_data: Any = None):
     if vid not in MAP:
         return (
@@ -920,7 +940,13 @@ window.EL.setRepeatCount(1);
 }'''
 
 
-with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Soft()) as demo:
+with gr.Blocks(
+    title="English Learning Lab",
+    css=CSS,
+    js=JS,
+    theme=gr.themes.Soft(),
+    delete_cache=(60, 5 * 60),
+) as demo:
     progress_state = gr.BrowserState(
         default_value=EMPTY_PROGRESS,
         storage_key="english-learning-lab-progress-v1",
@@ -1025,6 +1051,15 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
                     "✨ Lấy transcript YouTube + AI", variant="primary"
                 )
             online_status = gr.Markdown()
+        with gr.Tab("⬇️ Tải video YouTube"):
+            gr.Markdown(
+                "Dùng URL/Video ID trong ô **YouTube URL / Video ID** phía trên. "
+                "Chỉ hỗ trợ video công khai, không livestream, tối đa 2 giờ và 512 MB. "
+                "Chỉ tải nội dung bạn sở hữu hoặc có quyền tải; file được lưu tạm khoảng 5 phút."
+            )
+            download_video_btn = gr.Button("⬇️ Tải video về máy", variant="primary")
+            download_video_status = gr.Markdown()
+            download_video_file = gr.File(label="Video YouTube đã tải", interactive=False)
         with gr.Tab("🎧 Listening / Shadowing"):
             practice_out = gr.Markdown()
             practice_btn = gr.Button("🚀 Chuẩn bị luyện tập", variant="primary")
@@ -1199,6 +1234,14 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
         lambda: ("", "", "", "", []),
         None,
         [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
+    )
+    download_video_btn.click(
+        download_youtube_ui,
+        url,
+        [download_video_status, download_video_file],
+        concurrency_id="youtube-download",
+        concurrency_limit=1,
+        time_limit=1800,
     )
     # Changing the dropdown triggers lesson.change, which loads the next lesson.
     prev.click(lambda value: move(value, -1), lesson, lesson)

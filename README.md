@@ -23,6 +23,7 @@ English listening and shadowing practice built with Gradio. The app uses the pre
 - Schedule individual sentences for spaced review and load sentences that are due.
 - Import TXT, SRT, WebVTT, or JSON into the current session. Practice, quiz, AI Tutor, and review use the imported transcript; the published library is unchanged, and imported-transcript progress is kept separate.
 - Fetch a public YouTube caption track by URL or video ID, including auto-generated captions when available. Qwen groups caption fragments into sentences while retaining their timestamps. The fetched lesson is temporary to the current session; it can be practiced, quizzed, reviewed, and exported without modifying the published library.
+- Download a single public YouTube video you own or are authorized to download. Downloads exclude livestreams, are limited to two hours and 512 MB, and are offered through a temporary link that expires after about five minutes.
 - Run WhisperX directly on a YouTube URL when a caption track is unavailable. The app downloads audio only to a temporary directory, aligns recognized words, then deletes the audio. Online WhisperX is limited to public, non-live videos up to two hours and 512 MB.
 - Run WhisperX recognition and forced alignment on an uploaded audio/video file, download JSON/SRT, or load the result directly into the current lesson session. JSON keeps word-level timestamps.
 - View and download the active lesson transcript as JSON, then restore the published transcript at any time.
@@ -40,7 +41,7 @@ pip install -r requirements-ml.txt
 python app.py
 ```
 
-The Space Docker image installs Gradio, YouTube caption/audio clients, CPU-only PyTorch, WhisperX, Qwen dependencies, and FFmpeg. WhisperX and Qwen model weights are downloaded on their first use. WhisperX defaults to `small` with `int8` computation for CPU use; the default Space hardware is CPU, so processing long files and the first AI request may take a while. Caption mode fetches captions only; WhisperX mode downloads audio temporarily and deletes it after transcription.
+The Space Docker image installs Gradio, YouTube caption/audio clients, CPU-only PyTorch, WhisperX, Qwen dependencies, and FFmpeg. WhisperX and Qwen model weights are downloaded on their first use. WhisperX defaults to `small` with `int8` computation for CPU use; the default Space hardware is CPU, so processing long files and the first AI request may take a while. Caption mode fetches captions only; WhisperX mode downloads audio temporarily and deletes it after transcription. Video downloads are kept in a temporary cache; the source file is removed after five minutes and Gradio clears cached download copies periodically.
 
 YouTube may block requests from cloud-hosted Space IP addresses. If caption mode reports that YouTube blocked the Space, configure a residential proxy in the Space secrets as `YOUTUBE_TRANSCRIPT_PROXY_USERNAME` and `YOUTUBE_TRANSCRIPT_PROXY_PASSWORD`. WhisperX URL mode accepts an optional complete proxy URL in `YOUTUBE_AUDIO_PROXY`. Online mode requires a public, non-live video; use the WhisperX tab with an uploaded file when a URL cannot be fetched by the Space.
 
