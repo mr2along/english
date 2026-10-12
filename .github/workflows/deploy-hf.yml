@@ -61,6 +61,12 @@ jobs:
             --exclude=".github/*" \
             --exclude="__pycache__/*" \
             --exclude="*.pyc" \
+            --exclude=".env*" \
+            --exclude="**/.env*" \
+            --exclude="*.pem" \
+            --exclude="*.key" \
+            --exclude="data/progress.json" \
+            --exclude="Transcription/whisperx_outputs/**" \
             --commit-message="Deploy English Lab V21 ${GITHUB_SHA::7}"
 
       - name: Deployment summary

@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,14 @@ SUPPORTED_AUDIO_SUFFIXES = {
     ".mpeg", ".mpg", ".oga", ".ogg", ".opus", ".wav", ".webm", ".wma",
 }
 YOUTUBE_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}\Z")
+SUPPORTED_MODELS = {
+    "tiny", "base", "small", "medium", "large-v3", "large-v3-turbo",
+}
+SUPPORTED_COMPUTE_TYPES = {
+    "default", "int8", "int8_float16", "int8_float32", "float16", "float32", "bfloat16",
+}
+MAX_MEDIA_FILE_BYTES = 512 * 1024 * 1024
+MAX_MEDIA_DURATION_SECONDS = 2 * 60 * 60
 
 
 def _number(value: Any) -> float | None:
@@ -47,10 +56,54 @@ def transcribe_file(
         raise ValueError("Không tìm thấy tệp audio/video đã tải lên.")
     if path.suffix.lower() not in SUPPORTED_AUDIO_SUFFIXES:
         raise ValueError("Định dạng tệp chưa được hỗ trợ.")
-    if path.stat().st_size == 0:
+    file_size = path.stat().st_size
+    if file_size == 0:
         raise ValueError("Tệp audio/video đang rỗng.")
-    if not 1 <= int(batch_size) <= 32:
+    if file_size > MAX_MEDIA_FILE_BYTES:
+        raise ValueError("Tệp audio/video vượt giới hạn 512 MB.")
+    if not isinstance(model_name, str) or model_name not in SUPPORTED_MODELS:
+        raise ValueError("Whisper model chưa được hỗ trợ.")
+    if not isinstance(compute_type, str) or compute_type not in SUPPORTED_COMPUTE_TYPES:
+        raise ValueError("Compute type chưa được hỗ trợ.")
+    if language == "auto":
+        language = None
+    if language is not None and (
+        not isinstance(language, str) or not re.fullmatch(r"[a-z]{2,3}", language)
+    ):
+        raise ValueError("Mã ngôn ngữ audio không hợp lệ.")
+    if device is not None and (
+        not isinstance(device, str) or device.lower() not in {"auto", "cpu", "cuda"}
+    ):
+        raise ValueError("Device chỉ nhận auto, cpu hoặc cuda.")
+    try:
+        batch_size = int(batch_size)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("Batch size cần nằm trong khoảng 1–32.") from error
+    if not 1 <= batch_size <= 32:
         raise ValueError("Batch size cần nằm trong khoảng 1–32.")
+
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError("FFprobe chưa được cài; cần FFmpeg để xử lý audio/video.") from error
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Không đọc được thời lượng tệp trong 20 giây.") from error
+    except subprocess.CalledProcessError as error:
+        raise ValueError("FFmpeg không đọc được tệp audio/video này.") from error
+    duration = _number(probe.stdout.strip().splitlines()[0] if probe.stdout.strip() else None)
+    if duration is None or duration <= 0:
+        raise ValueError("Không xác định được thời lượng audio/video.")
+    if duration > MAX_MEDIA_DURATION_SECONDS:
+        raise ValueError("Audio/video dài hơn giới hạn 2 giờ cho mỗi lần chép lời.")
 
     try:
         import torch
@@ -79,7 +132,7 @@ def transcribe_file(
             compute_type=compute_type,
             language=language,
         )
-        recognized = model.transcribe(audio, batch_size=int(batch_size))
+        recognized = model.transcribe(audio, batch_size=batch_size)
         raw_segments = recognized.get("segments") or []
         if not raw_segments:
             raise RuntimeError("WhisperX không tìm thấy lời thoại trong tệp này.")

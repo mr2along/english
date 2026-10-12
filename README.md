@@ -53,7 +53,7 @@ pip install -r requirements-whisperx.txt
 pip install -r requirements-ml.txt
 ```
 
-The WhisperX tab accepts one local audio/video file or an eligible YouTube URL, detects language automatically or uses the selected language, aligns recognized words, and provides JSON/SRT downloads for uploaded files. The default model is `small`; larger models need more memory and take longer, especially on CPU. FFmpeg must be installed and available on `PATH`. For GPU use, install a PyTorch build compatible with the machine's CUDA setup before installing WhisperX. `requirements-ml.txt` installs the Qwen runtime used by AI Tutor and caption sentence grouping.
+The WhisperX tab accepts one local audio/video file or an eligible YouTube URL, detects language automatically or uses the selected language, aligns recognized words, and provides JSON/SRT downloads for uploaded files. Uploads and YouTube audio are limited to 512 MB and two hours. The default model is `small`; larger models need more memory and take longer, especially on CPU. FFmpeg and `ffprobe` must be installed and available on `PATH`. For GPU use, install a PyTorch build compatible with the machine's CUDA setup before installing WhisperX. `requirements-ml.txt` installs the shared Qwen runtime used by AI Tutor and caption sentence grouping. Model inference is queued so only one WhisperX/Qwen job uses the app's memory at a time.
 
 The same processor can run from the command line:
 

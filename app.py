@@ -44,6 +44,8 @@ MAP = {video.get("video_id"): video for video in VIDEOS if video.get("video_id")
 TOTAL = sum(len(video.get("transcript", [])) for video in VIDEOS)
 DEFAULT = VIDEOS[0]["video_id"] if VIDEOS else ""
 EMPTY_PROGRESS = {"lessons": {}, "words": {}, "reviews": {}}
+MAX_TRANSCRIPT_SEGMENTS = 20_000
+MAX_TRANSCRIPT_TEXT_CHARS = 10_000
 
 
 def choices() -> list[tuple[str, str]]:
@@ -596,13 +598,25 @@ def import_transcript(
     raw = text or ""
     if file:
         try:
-            raw = Path(file).read_text(encoding="utf-8-sig")
+            import_path = Path(file)
+            if import_path.stat().st_size > 10 * 1024 * 1024:
+                return "❌ Transcript import vượt giới hạn 10 MB.", *unchanged
+            raw = import_path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeError) as error:
             return f"❌ Không đọc được file: {html.escape(str(error))}", *unchanged
+    if len(raw.encode("utf-8")) > 10 * 1024 * 1024:
+        return "❌ Transcript import vượt giới hạn 10 MB.", *unchanged
     try:
         segments = parse_manual(raw, video_id=vid)
         if not segments:
             return "❌ Không tìm thấy câu có timestamp trong transcript.", *unchanged
+        if len(segments) > MAX_TRANSCRIPT_SEGMENTS:
+            return f"❌ Transcript vượt giới hạn {MAX_TRANSCRIPT_SEGMENTS:,} câu.", *unchanged
+        if any(
+            len(str(segment.get("text", ""))) > MAX_TRANSCRIPT_TEXT_CHARS
+            for segment in segments
+        ):
+            return "❌ Một câu trong transcript vượt giới hạn 10.000 ký tự.", *unchanged
         previous = session_video(vid, transcript_override) or {}
         imported = {
             "video_id": vid,
@@ -669,6 +683,10 @@ def fetch_youtube_online(
             segments = normalize(fetched.get("segments", []))
             if not segments:
                 raise ValueError("WhisperX không tạo được câu có timestamp.")
+            if len(segments) > MAX_TRANSCRIPT_SEGMENTS:
+                raise ValueError(
+                    f"Kết quả vượt giới hạn {MAX_TRANSCRIPT_SEGMENTS:,} câu cho mỗi phiên."
+                )
             video_id = fetched["video_id"]
             imported = {
                 "video_id": video_id,
@@ -691,6 +709,10 @@ def fetch_youtube_online(
             raw = normalize(fetched.get("segments", []))
             if not raw:
                 raise ValueError("Track phụ đề không có caption dùng được.")
+            if len(raw) > MAX_TRANSCRIPT_SEGMENTS:
+                raise ValueError(
+                    f"Video có hơn {MAX_TRANSCRIPT_SEGMENTS:,} caption; hãy dùng video ngắn hơn."
+                )
 
             language_names = {
                 "en": "English",
@@ -1133,7 +1155,9 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
     gr.Markdown("### 📥 Import transcript dự phòng")
     with gr.Row():
         file = gr.File(file_types=[".txt", ".srt", ".vtt", ".json"], type="filepath", label="TXT / SRT / VTT / JSON")
-        text = gr.Textbox(label="Hoặc dán transcript", lines=4)
+        text = gr.Textbox(
+            label="Hoặc dán transcript", lines=4, max_length=10_000_000
+        )
     imp = gr.Button("📥 Nạp transcript vào phiên này")
     reset_import = gr.Button("↩ Khôi phục transcript thư viện")
     imp_status = gr.Markdown()
@@ -1164,7 +1188,7 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
         fetch_youtube_online,
         [url, online_mode, online_language, online_model, progress_state, transcript_override],
         [online_status, *lesson_outputs],
-        concurrency_id="ai-tutor",
+        concurrency_id="ml-inference",
         concurrency_limit=1,
         time_limit=1800,
     ).then(
@@ -1205,7 +1229,7 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
         grammar,
         [lesson, sentence_no, transcript_override],
         ai_out,
-        concurrency_id="ai-tutor",
+        concurrency_id="ml-inference",
         concurrency_limit=1,
         time_limit=1800,
     )
@@ -1213,7 +1237,7 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
         vocab,
         [lesson, sentence_no, transcript_override],
         ai_out,
-        concurrency_id="ai-tutor",
+        concurrency_id="ml-inference",
         concurrency_limit=1,
         time_limit=1800,
     )
@@ -1249,7 +1273,7 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
         speech_to_text_ui,
         [speech_audio, speech_model, speech_language],
         [spoken, speech_status],
-        concurrency_id="whisperx-job",
+        concurrency_id="ml-inference",
         concurrency_limit=1,
         time_limit=1800,
     )
@@ -1308,7 +1332,7 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
             whisperx_batch,
         ],
         [whisperx_status, whisperx_json, whisperx_json_file, whisperx_srt_file],
-        concurrency_id="whisperx-job",
+        concurrency_id="ml-inference",
         concurrency_limit=1,
         time_limit=3600,
     )
@@ -1334,4 +1358,9 @@ with gr.Blocks(title="English Learning Lab", css=CSS, js=JS, theme=gr.themes.Sof
     next_sentence.click(None, js="() => {window.EL?.nextSentence(); return []}")
 
 
-demo.launch(server_name="0.0.0.0", server_port=int(os.getenv("PORT", "7860")))
+demo.queue(default_concurrency_limit=1, max_size=32)
+demo.launch(
+    server_name="0.0.0.0",
+    server_port=int(os.getenv("PORT", "7860")),
+    max_file_size="512mb",
+)

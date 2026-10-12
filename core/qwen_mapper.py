@@ -4,19 +4,11 @@ import os
 import re
 from typing import Callable, Dict, List
 
-_MODEL = None
-_TOKENIZER = None
+from core.qwen_runtime import load_qwen_model
 
 
 def _load_model():
-    global _MODEL, _TOKENIZER
-    if _MODEL is not None:
-        return _TOKENIZER, _MODEL
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    model_id = os.getenv("QWEN_MODEL", "Qwen/Qwen3-0.6B")
-    _TOKENIZER = AutoTokenizer.from_pretrained(model_id)
-    _MODEL = AutoModelForCausalLM.from_pretrained(model_id, dtype="auto", device_map="auto")
-    return _TOKENIZER, _MODEL
+    return load_qwen_model()
 
 
 def _fallback(raw: List[Dict]) -> List[Dict]:

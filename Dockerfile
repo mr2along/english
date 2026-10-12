@@ -15,9 +15,19 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 RUN pip install --no-cache-dir -r /tmp/requirements-whisperx.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-ml.txt
 
-COPY . /app
+RUN groupadd --gid 1000 app \
+    && useradd --uid 1000 --gid app --create-home --home-dir /home/app app \
+    && mkdir -p /home/app/.cache/huggingface \
+    && chown -R app:app /app /home/app
 
-ENV PORT=7860
+COPY --chown=app:app . /app
+
+ENV PORT=7860 \
+    HOME=/home/app \
+    HF_HOME=/home/app/.cache/huggingface \
+    XDG_CACHE_HOME=/home/app/.cache
 EXPOSE 7860
+
+USER app
 
 CMD ["python", "app.py"]

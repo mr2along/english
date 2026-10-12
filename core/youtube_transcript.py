@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from core.library import video_id as parse_video_id
+from core.whisperx_runner import MAX_MEDIA_DURATION_SECONDS, MAX_MEDIA_FILE_BYTES
 
 
 def _api():
@@ -141,7 +142,7 @@ def transcribe_youtube_audio(
             duration = float(info.get("duration"))
         except (TypeError, ValueError):
             duration = None
-        if duration is not None and duration > 2 * 60 * 60:
+        if duration is not None and duration > MAX_MEDIA_DURATION_SECONDS:
             return "Video dài hơn giới hạn 2 giờ cho chép lời online."
         return None
 
@@ -156,7 +157,7 @@ def transcribe_youtube_audio(
             "socket_timeout": 30,
             "retries": 2,
             "fragment_retries": 2,
-            "max_filesize": 512 * 1024 * 1024,
+            "max_filesize": MAX_MEDIA_FILE_BYTES,
             "match_filter": limit_video,
             "progress_hooks": [report_download],
         }
@@ -179,7 +180,7 @@ def transcribe_youtube_audio(
                 audio_path = candidates[0] if candidates else audio_path
             if not audio_path.is_file() or audio_path.stat().st_size == 0:
                 raise RuntimeError("yt-dlp không tạo được tệp audio.")
-            if audio_path.stat().st_size > 512 * 1024 * 1024:
+            if audio_path.stat().st_size > MAX_MEDIA_FILE_BYTES:
                 raise RuntimeError("Audio vượt giới hạn kích thước 512 MB.")
             if progress_callback:
                 progress_callback(0.0, "Đang chép lời bằng WhisperX")
