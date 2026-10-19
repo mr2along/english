@@ -875,7 +875,9 @@ CSS = r"""
 body{background:#f8fafc}
 .gradio-container{max-width:1480px!important;padding:18px 22px 40px!important}
 .hero{padding:28px 30px;border-radius:24px;border:1px solid #dbe4f0;background:linear-gradient(135deg,#eef6ff,#f5f3ff,#f8fafc);box-shadow:0 8px 30px rgba(15,23,42,.06);margin-bottom:14px}
-.hero,.stat,.toolbar,.panel,.repeat-bar{color:#0f172a}
+.hero,.stat,.toolbar,.panel,.repeat-bar{color:#0f172a!important}
+.panel .panel-title,.panel .line,.panel .line-text,.panel .empty{color:#0f172a!important}
+.repeat-bar .repeat-label,.repeat-bar .repeat-label *{color:#475569!important}
 .hero h1{margin:0;font-size:34px;line-height:1.2;overflow-wrap:anywhere}
 .hero .sub{margin-top:7px;color:#64748b;font-size:14px;line-height:1.5}
 .badge{display:inline-block;margin-top:13px;padding:5px 10px;border-radius:999px;background:#fff;border:1px solid #dbe4f0;color:#475569;font-size:12px;font-weight:700}
@@ -893,7 +895,7 @@ body{background:#f8fafc}
 .count{font-size:12px;color:#64748b;white-space:nowrap}
 .lines{max-height:590px;overflow:auto;overscroll-behavior:contain;padding:8px}
 .lines.transcript-hidden{display:none!important}
-.line{display:flex;align-items:flex-start;gap:12px;width:100%;border:0;background:transparent;padding:11px 12px;border-radius:12px;text-align:left;cursor:pointer;line-height:1.5;color:#1e293b}
+.line{display:flex;align-items:flex-start;gap:12px;width:100%;border:0;background:transparent;padding:11px 12px;border-radius:12px;text-align:left;cursor:pointer;line-height:1.5;color:#1e293b!important}
 .line:hover,.line.active{background:#e0ecff}
 .line:focus-visible{outline:3px solid #2563eb;outline-offset:2px}
 .line-text{min-width:0;overflow-wrap:anywhere;word-break:normal}
