@@ -1073,6 +1073,18 @@ with gr.Blocks(
             "Chọn câu trong transcript rồi bấm **🔁 Lặp câu**. Mỗi lần lặp giữ nguyên timestamp của câu.",
             elem_classes="repeat-label",
         )
+    with gr.Row(elem_classes="sentence-selector-row"):
+        sentence_no = gr.Number(
+            value=0,
+            precision=0,
+            label="Câu đang chọn (0 = câu đầu)",
+            elem_id="sentence-no",
+            scale=1,
+        )
+        gr.Markdown(
+            "Chọn câu trong transcript để đồng bộ câu mẫu cho các chức năng luyện tập.",
+            scale=3,
+        )
 
     with gr.Tabs():
         with gr.Tab("🌐 YouTube online + AI"):
@@ -1127,9 +1139,6 @@ with gr.Blocks(
         with gr.Tab("🎧 Listening / Shadowing"):
             practice_out = gr.Markdown()
             practice_btn = gr.Button("🚀 Chuẩn bị luyện tập", variant="primary")
-            sentence_no = gr.Number(
-                value=0, precision=0, label="Số câu (bắt đầu từ 0)", elem_id="sentence-no"
-            )
             practice_play = gr.Button("▶ Phát câu đang chọn")
             mark_btn = gr.Button("✅ Đánh dấu câu đã luyện")
             mark_out = gr.Markdown()

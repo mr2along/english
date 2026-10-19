@@ -6,6 +6,32 @@ from pathlib import Path
 
 
 class GradioBindingTests(unittest.TestCase):
+    def test_sentence_selector_is_shared_outside_lazy_tabs(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        tree = ast.parse(app_path.read_text(encoding="utf-8"))
+        selector_line = next(
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "sentence_no"
+                for target in node.targets
+            )
+        )
+        tabs_line = next(
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.With)
+            and any(
+                isinstance(item.context_expr, ast.Call)
+                and isinstance(item.context_expr.func, ast.Attribute)
+                and item.context_expr.func.attr == "Tabs"
+                for item in node.items
+            )
+        )
+
+        self.assertLess(selector_line, tabs_line)
+
     def test_callback_argument_counts_match_bound_inputs(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
         tree = ast.parse(app_path.read_text(encoding="utf-8"))
