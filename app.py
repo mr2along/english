@@ -21,11 +21,18 @@ from urllib.parse import quote
 import gradio as gr
 
 from core.ai_tutor import explain, grammar_request, vocabulary_request
+from core.file_cleanup import remove_stale_files, schedule_file_removal
 from core.learning_engine import make_practice_items
 from core.library import load, video_id
 from core.practice import make_quiz
 from core.progress import ProgressStore
-from core.transcript import format_time, normalize, parse_manual, to_json
+from core.transcript import (
+    format_time,
+    normalize,
+    parse_manual,
+    render_transcript_html,
+    to_json,
+)
 from core.qwen_mapper import map_segments_detailed
 from core.youtube_download import download_youtube_video
 from core.youtube_transcript import fetch_youtube_transcript, transcribe_youtube_audio
@@ -47,6 +54,7 @@ DEFAULT = VIDEOS[0]["video_id"] if VIDEOS else ""
 EMPTY_PROGRESS = {"lessons": {}, "words": {}, "reviews": {}}
 MAX_TRANSCRIPT_SEGMENTS = 20_000
 MAX_TRANSCRIPT_TEXT_CHARS = 10_000
+GENERATED_FILE_TTL_SECONDS = 15 * 60
 
 
 def choices() -> list[tuple[str, str]]:
@@ -100,32 +108,11 @@ def yt(vid: str | None) -> str:
 
 
 def transcript_html(segments: list[dict[str, Any]]) -> str:
-    if not segments:
-        return (
-            '<div class="panel"><div class="panel-title">📝 Transcript</div>'
-            '<div class="empty">Chưa có transcript.</div></div>'
-        )
-    rows = []
-    for index, segment in enumerate(segments):
-        try:
-            start = max(0.0, float(segment.get("start", 0) or 0))
-            duration = max(0.0, float(segment.get("duration", 0) or 0))
-        except (TypeError, ValueError):
-            start, duration = 0.0, 0.0
-        end = start + duration
-        sentence = html.escape(str(segment.get("text", "")), quote=False)
-        rows.append(
-            f'<button type="button" class="line" data-index="{index}" '
-            f'data-start="{start:.3f}" data-end="{end:.3f}" '
-            f'aria-label="Phát câu {index + 1}, bắt đầu lúc {format_time(start)}">'
-            f'<span class="time">{format_time(start)}</span>'
-            f'<span class="line-text">{sentence}</span></button>'
-        )
-    return (
-        '<div class="panel"><div class="panel-title"><span>📝 Transcript</span>'
-        f'<span class="count">{len(segments):,} câu</span></div>'
-        f'<div class="lines">{"".join(rows)}</div></div>'
-    )
+    return render_transcript_html(segments)
+
+
+def transcript_view(segments: list[dict[str, Any]], visible: bool = True) -> str:
+    return render_transcript_html(segments, visible)
 
 
 def _store(progress_data: Any = None) -> ProgressStore:
@@ -212,7 +199,12 @@ def progress_scope(vid: str | None, transcript_override: Any = None) -> str | No
     return vid
 
 
-def select(vid: str | None, progress_data: Any = None, transcript_override: Any = None):
+def select(
+    vid: str | None,
+    progress_data: Any = None,
+    transcript_override: Any = None,
+    show_script: bool = True,
+):
     video = session_video(vid, transcript_override)
     if not video:
         return (
@@ -242,7 +234,7 @@ def select(vid: str | None, progress_data: Any = None, transcript_override: Any 
     return (
         lesson_status(vid, store.data, active_override),
         yt(vid),
-        transcript_html(segments),
+        transcript_view(segments, show_script),
         to_json(segments),
         lesson_value,
         f"https://www.youtube.com/watch?v={vid}",
@@ -253,10 +245,15 @@ def select(vid: str | None, progress_data: Any = None, transcript_override: Any 
     )
 
 
-def open_url(value: str | None, progress_data: Any = None, transcript_override: Any = None):
+def open_url(
+    value: str | None,
+    progress_data: Any = None,
+    transcript_override: Any = None,
+    show_script: bool = True,
+):
     vid = video_id(value or "")
     if session_video(vid, transcript_override):
-        return select(vid, progress_data, transcript_override)
+        return select(vid, progress_data, transcript_override, show_script)
     return (
         "❌ Video chưa có trong thư viện. Mở tab **YouTube online + AI** để lấy phụ đề cho video này.",
         yt(None),
@@ -287,10 +284,9 @@ def move(vid: str | None, direction: int):
     ids = list(MAP)
     if not ids:
         return None
-    try:
-        index = ids.index(vid)
-    except ValueError:
-        index = 0
+    if vid not in MAP:
+        return ids[-1] if direction < 0 else ids[0]
+    index = ids.index(vid)
     return ids[(index + direction) % len(ids)]
 
 
@@ -592,6 +588,7 @@ def import_transcript(
     vid: str | None,
     progress_data: Any = None,
     transcript_override: Any = None,
+    show_script: bool = True,
 ):
     unchanged = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
     if not session_video(vid, transcript_override):
@@ -636,7 +633,7 @@ def import_transcript(
         return (
             message,
             to_json(segments),
-            transcript_html(segments),
+            transcript_view(segments, show_script),
             imported,
             lesson_status(vid, progress_data, imported),
             sentence_for(vid, 0, imported),
@@ -651,8 +648,9 @@ def import_transcript_text(
     vid: str | None,
     progress_data: Any = None,
     transcript_override: Any = None,
+    show_script: bool = True,
 ):
-    return import_transcript(None, text, vid, progress_data, transcript_override)
+    return import_transcript(None, text, vid, progress_data, transcript_override, show_script)
 
 
 def fetch_youtube_online(
@@ -662,6 +660,7 @@ def fetch_youtube_online(
     model_name: str,
     progress_data: Any = None,
     transcript_override: Any = None,
+    show_script: bool = True,
     progress=gr.Progress(track_tqdm=True),
 ):
     unchanged = tuple(gr.update() for _ in range(10))
@@ -771,7 +770,7 @@ def fetch_youtube_online(
                 f"{ai_message} Đã nạp vào phiên hiện tại; dữ liệu thư viện không bị thay đổi."
             )
 
-        selected = select(video_id, progress_data, imported)
+        selected = select(video_id, progress_data, imported, show_script)
         progress(1.0, desc="Hoàn tất")
         return (message, *selected)
     except Exception as error:
@@ -797,7 +796,9 @@ def download_youtube_ui(value: str | None, progress=gr.Progress(track_tqdm=True)
         return f"❌ {html.escape(str(error))}", None
 
 
-def restore_library_transcript(vid: str | None, progress_data: Any = None):
+def restore_library_transcript(
+    vid: str | None, progress_data: Any = None, show_script: bool = True
+):
     if vid not in MAP:
         return (
             "❌ Hãy chọn bài học trước.",
@@ -807,7 +808,7 @@ def restore_library_transcript(vid: str | None, progress_data: Any = None):
     return (
         "✅ Đã khôi phục transcript trong thư viện.",
         to_json(segments),
-        transcript_html(segments),
+        transcript_view(segments, show_script),
         None,
         lesson_status(vid, progress_data),
         sentence_for(vid, 0),
@@ -820,9 +821,10 @@ def export_transcript(vid: str | None, transcript_override: Any = None) -> str:
         raise ValueError("Hãy chọn bài học trước khi tải transcript.")
     segments = effective_segments(vid, transcript_override)
     output_dir = Path(tempfile.gettempdir()) / "english-lab-exports"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    remove_stale_files(output_dir, GENERATED_FILE_TTL_SECONDS)
     path = output_dir / f"transcript_{vid}_{uuid.uuid4().hex[:10]}.json"
     path.write_text(to_json(segments) + "\n", encoding="utf-8")
+    schedule_file_removal([path], GENERATED_FILE_TTL_SECONDS)
     return str(path)
 
 
@@ -852,11 +854,12 @@ def run_whisperx_ui(
         )
         payload = make_payload(result, source_name=source_name, video_id=vid, title=title)
         output_dir = Path(tempfile.gettempdir()) / "english-lab-whisperx"
-        output_dir.mkdir(parents=True, exist_ok=True)
+        remove_stale_files(output_dir, GENERATED_FILE_TTL_SECONDS)
         unique = uuid.uuid4().hex[:10]
         json_path = output_dir / f"transcript_{unique}.json"
         srt_path = output_dir / f"transcript_{unique}.srt"
         json_file, srt_file = write_outputs(payload, json_path, srt_path)
+        schedule_file_removal([json_file, srt_file], GENERATED_FILE_TTL_SECONDS)
         lesson = payload["videos"][0]
         status = (
             f"✅ Hoàn tất: {lesson['sentence_count']:,} đoạn, "
@@ -888,6 +891,7 @@ body{background:#f8fafc}
 .panel-title{padding:14px 16px;border-bottom:1px solid #e2e8f0;font-weight:800;display:flex;justify-content:space-between;gap:8px}
 .count{font-size:12px;color:#64748b;white-space:nowrap}
 .lines{max-height:590px;overflow:auto;overscroll-behavior:contain;padding:8px}
+.lines.transcript-hidden{display:none!important}
 .line{display:flex;align-items:flex-start;gap:12px;width:100%;border:0;background:transparent;padding:11px 12px;border-radius:12px;text-align:left;cursor:pointer;line-height:1.5;color:inherit}
 .line:hover,.line.active{background:#e0ecff}
 .line:focus-visible{outline:3px solid #2563eb;outline-offset:2px}
@@ -913,7 +917,7 @@ body{background:#f8fafc}
 
 JS = r'''() => {
 let i=-1,n=[],repeatCount=1,repeatsLeft=0,active=false,player=null,frame=null,apiLoading=false;
-const clear=()=>{active=false};
+const clear=()=>{active=false;repeatsLeft=0;call('pauseVideo')};
 const ready=()=>{
  const el=document.getElementById('ytplayer');
  if(!el||el===frame||!window.YT?.Player)return;
@@ -1207,7 +1211,7 @@ with gr.Blocks(
         target, transcript_override,
     ]
     lesson_change = lesson.change(
-        select, [lesson, progress_state, transcript_override], lesson_outputs
+        select, [lesson, progress_state, transcript_override, show], lesson_outputs
     )
     lesson_change.then(
         due_reviews, [lesson, progress_state, transcript_override], [due_summary, due_sentence]
@@ -1217,11 +1221,15 @@ with gr.Blocks(
         None,
         [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
     )
-    open_btn.click(select, [lesson, progress_state, transcript_override], lesson_outputs)
-    url_btn.click(open_url, [url, progress_state, transcript_override], lesson_outputs)
+    open_btn.click(
+        select, [lesson, progress_state, transcript_override, show], lesson_outputs
+    )
+    url_btn.click(
+        open_url, [url, progress_state, transcript_override, show], lesson_outputs
+    )
     online_fetch_btn.click(
         fetch_youtube_online,
-        [url, online_mode, online_language, online_model, progress_state, transcript_override],
+        [url, online_mode, online_language, online_model, progress_state, transcript_override, show],
         [online_status, *lesson_outputs],
         concurrency_id="ml-inference",
         concurrency_limit=1,
@@ -1247,8 +1255,9 @@ with gr.Blocks(
     prev.click(lambda value: move(value, -1), lesson, lesson)
     nxt.click(lambda value: move(value, 1), lesson, lesson)
     show.change(
-        lambda visible, vid, override: transcript_html(effective_segments(vid, override))
-        if visible else '<div class="panel"><div class="empty">Script đang ẩn.</div></div>',
+        lambda visible, vid, override: transcript_view(
+            effective_segments(vid, override), visible
+        ),
         [show, lesson, transcript_override],
         trans,
     )
@@ -1322,7 +1331,7 @@ with gr.Blocks(
     )
     imp.click(
         import_transcript,
-        [file, text, lesson, progress_state, transcript_override],
+        [file, text, lesson, progress_state, transcript_override, show],
         [imp_status, parsed, trans, transcript_override, status, target, sentence_no],
     ).then(
         due_reviews,
@@ -1335,7 +1344,7 @@ with gr.Blocks(
     )
     reset_import.click(
         restore_library_transcript,
-        [lesson, progress_state],
+        [lesson, progress_state, show],
         [imp_status, parsed, trans, transcript_override, status, target, sentence_no],
     ).then(
         due_reviews,
@@ -1348,7 +1357,7 @@ with gr.Blocks(
     )
     whisperx_import.click(
         import_transcript_text,
-        [whisperx_json, lesson, progress_state, transcript_override],
+        [whisperx_json, lesson, progress_state, transcript_override, show],
         [imp_status, parsed, trans, transcript_override, status, target, sentence_no],
     ).then(
         due_reviews,

@@ -67,3 +67,5 @@ Without `--video-id`, the result is still a standalone transcript, but it cannot
 ## Deploy
 
 `.github/workflows/deploy-hf.yml` deploys pushes to `feature/english-lab-v21` to `Mrlongpro/autosubs` through Hugging Face Trusted Publisher OIDC. It needs a matching Trusted Publisher resource configured for `spaces/Mrlongpro/autosubs`; no long-lived Hugging Face token is stored in GitHub Actions.
+
+The deployment workflow compiles the Python modules and runs the regression checks in `tests/` before uploading. Run the checks locally with `python -m unittest discover -s tests -v`.

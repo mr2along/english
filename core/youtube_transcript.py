@@ -136,13 +136,15 @@ def transcribe_youtube_audio(
             progress_callback(1.0, "Đã tải audio · đang nhận dạng bằng WhisperX")
 
     def limit_video(info: dict, *, incomplete: bool = False):
-        if info.get("is_live") or info.get("live_status") == "is_live":
-            return "Không thể chép lời livestream đang phát."
+        if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
+            return "Không hỗ trợ livestream hoặc buổi phát trực tiếp sắp diễn ra."
         try:
             duration = float(info.get("duration"))
         except (TypeError, ValueError):
-            duration = None
-        if duration is not None and duration > MAX_MEDIA_DURATION_SECONDS:
+            return "Không xác định được thời lượng video nên đã dừng để bảo vệ tài nguyên Space."
+        if duration <= 0:
+            return "Video không có thời lượng hợp lệ."
+        if duration > MAX_MEDIA_DURATION_SECONDS:
             return "Video dài hơn giới hạn 2 giờ cho chép lời online."
         return None
 

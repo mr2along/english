@@ -39,6 +39,7 @@ jobs:
           python -m py_compile app.py
           python -m compileall -q core
           python -m py_compile Transcription/run_whisperx.py
+          python -m unittest discover -s tests -v
           echo "✅ Python validation passed"
 
       - name: Install Hugging Face CLI

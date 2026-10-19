@@ -2,6 +2,7 @@ import html, json, math, re
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
+from core.transcript import estimate_duration
 
 FINAL_RAW = "https://raw.githubusercontent.com/mr2along/english/feature/english-lab-v21/Transcription/final_transcripts.json"
 FINAL_RAW_ROOT = "https://raw.githubusercontent.com/mr2along/english/feature/english-lab-v21/final_transcripts.json"
@@ -57,10 +58,16 @@ def segments(raw):
                     except (TypeError,ValueError): continue
                     if not math.isfinite(ws) or not math.isfinite(we) or ws < 0 or we < ws: continue
                     ww.append({"word":clean(w.get("word")),"start":ws,"end":we})
-                if ww: x["words"]=ww
+                if ww:
+                    x["words"]=ww
+                    if not x["duration"]:
+                        word_end=max(word["end"] for word in ww)
+                        if word_end > start: x["duration"]=word_end-start
             out.append(x)
     for i in range(len(out)-1):
         if not out[i]["duration"]: out[i]["duration"]=max(0,out[i+1]["start"]-out[i]["start"])
+    for item in out:
+        if not item["duration"]: item["duration"]=estimate_duration(item["text"])
     return out
 
 def validate(data):

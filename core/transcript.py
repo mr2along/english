@@ -22,6 +22,43 @@ def format_time(seconds: Any) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
 
 
+def estimate_duration(text: Any) -> float:
+    """Give a timestamp-only final sentence a short playable interval."""
+    word_count = len(str(text or "").split())
+    return round(max(1.0, min(30.0, word_count / 2.8)), 3)
+
+
+def render_transcript_html(segments: list[dict[str, Any]], visible: bool = True) -> str:
+    """Render transcript controls, retaining them in the DOM when text is hidden."""
+    if not segments:
+        return (
+            '<div class="panel"><div class="panel-title">📝 Transcript</div>'
+            '<div class="empty">Chưa có transcript.</div></div>'
+        )
+    rows = []
+    for index, segment in enumerate(segments):
+        try:
+            start = max(0.0, float(segment.get("start", 0) or 0))
+            duration = max(0.0, float(segment.get("duration", 0) or 0))
+        except (TypeError, ValueError):
+            start, duration = 0.0, 0.0
+        end = start + duration
+        sentence = html.escape(str(segment.get("text", "")), quote=False)
+        rows.append(
+            f'<button type="button" class="line" data-index="{index}" '
+            f'data-start="{start:.3f}" data-end="{end:.3f}" '
+            f'aria-label="Phát câu {index + 1}, bắt đầu lúc {format_time(start)}">'
+            f'<span class="time">{format_time(start)}</span>'
+            f'<span class="line-text">{sentence}</span></button>'
+        )
+    hidden_class = " transcript-hidden" if not visible else ""
+    return (
+        '<div class="panel"><div class="panel-title"><span>📝 Transcript</span>'
+        f'<span class="count">{len(segments):,} câu</span></div>'
+        f'<div class="lines{hidden_class}">{"".join(rows)}</div></div>'
+    )
+
+
 def to_json(segments: Any) -> str:
     return json.dumps(segments or [], ensure_ascii=False, indent=2)
 
@@ -59,9 +96,9 @@ def _json_segments(data: Any, video_id: str | None = None) -> Any:
         ) if video_id else None
         if video is None and len(videos) == 1:
             only_video = videos[0]
-            if isinstance(only_video, dict) and not only_video.get("video_id"):
-                video = only_video
-            elif not video_id:
+            if isinstance(only_video, dict):
+                # Importing a one-video file overlays the currently selected lesson.
+                # Its source ID can differ from the lesson ID in the UI.
                 video = only_video
         if not isinstance(video, dict):
             return []
@@ -81,7 +118,16 @@ def parse_manual(raw: str, video_id: str | None = None) -> list[dict[str, Any]]:
     if is_json:
         data = json.loads(raw)
         source = _json_segments(data, video_id)
-        if not source and isinstance(data, dict) and isinstance(data.get("videos"), list):
+        if (
+            not source
+            and isinstance(data, dict)
+            and isinstance(data.get("videos"), list)
+            and len(data["videos"]) > 1
+            and not any(
+                isinstance(item, dict) and item.get("video_id") == video_id
+                for item in data["videos"]
+            )
+        ):
             raise ValueError("JSON có nhiều bài; hãy chọn bài học tương ứng trước khi xem trước.")
         return normalize(source)
 
@@ -113,7 +159,7 @@ def parse_manual(raw: str, video_id: str | None = None) -> list[dict[str, Any]]:
             continue
         i += 1
     if out:
-        return out
+        return normalize(out)
 
     # Plain text format: [m:ss] caption.
     for line in lines:
@@ -132,7 +178,7 @@ def parse_manual(raw: str, video_id: str | None = None) -> list[dict[str, Any]]:
             )
     for index in range(len(out) - 1):
         out[index]["duration"] = max(0.0, out[index + 1]["start"] - out[index]["start"])
-    return out
+    return normalize(out)
 
 
 def normalize(raw: Any) -> list[dict[str, Any]]:
@@ -187,10 +233,17 @@ def normalize(raw: Any) -> list[dict[str, Any]]:
                     )
             if aligned_words:
                 segment["words"] = aligned_words
+                if not segment["duration"]:
+                    word_end = max(word["end"] for word in aligned_words)
+                    if word_end > start:
+                        segment["duration"] = word_end - start
         out.append(segment)
     for index in range(len(out) - 1):
         if not out[index]["duration"]:
             out[index]["duration"] = max(0.0, out[index + 1]["start"] - out[index]["start"])
+    for segment in out:
+        if not segment["duration"]:
+            segment["duration"] = estimate_duration(segment["text"])
     return out
 
 
