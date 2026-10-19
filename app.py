@@ -55,6 +55,7 @@ EMPTY_PROGRESS = {"lessons": {}, "words": {}, "reviews": {}}
 MAX_TRANSCRIPT_SEGMENTS = 20_000
 MAX_TRANSCRIPT_TEXT_CHARS = 10_000
 GENERATED_FILE_TTL_SECONDS = 15 * 60
+SELECT_OUTPUT_COUNT = 17
 AI_TUTOR_HELP = (
     "Chọn câu trong transcript rồi yêu cầu Qwen giải thích bằng tiếng Việt. "
     "Model được tải ở lần dùng đầu tiên."
@@ -219,9 +220,8 @@ def select(
             None,
             "",
             progress_data or EMPTY_PROGRESS,
-            0,
-            "",
             None,
+            *refresh_lesson_panels(None, progress_data, transcript_override),
         )
     store = _store(progress_data)
     active_override = (
@@ -243,9 +243,8 @@ def select(
         lesson_value,
         f"https://www.youtube.com/watch?v={vid}",
         store.data,
-        0,
-        sentence_for(vid, 0, active_override),
         active_override,
+        *refresh_lesson_panels(vid, store.data, active_override),
     )
 
 
@@ -266,9 +265,8 @@ def open_url(
         None,
         value or "",
         progress_data or EMPTY_PROGRESS,
-        0,
-        "",
         None,
+        *refresh_lesson_panels(None, progress_data, transcript_override),
     )
 
 
@@ -397,9 +395,15 @@ def refresh_lesson_panels_if_valid(
     return refresh_lesson_panels(vid, progress_data, transcript_override)
 
 
-def clear_sentence_feedback():
-    """Clear feedback tied to a sentence when its selection changes."""
-    return "", AI_TUTOR_HELP, "", ""
+def sentence_selection(vid: str | None, index: Any, transcript_override: Any = None):
+    """Update the sentence target and clear feedback tied to the previous one."""
+    return (
+        sentence_for(vid, index, transcript_override),
+        "",
+        AI_TUTOR_HELP,
+        "",
+        "",
+    )
 
 
 def grammar(vid: str | None, index: Any, transcript_override: Any = None) -> str:
@@ -703,7 +707,7 @@ def fetch_youtube_online(
     show_script: bool = True,
     progress=gr.Progress(track_tqdm=True),
 ):
-    unchanged = tuple(gr.update() for _ in range(10))
+    unchanged = tuple(gr.update() for _ in range(SELECT_OUTPUT_COUNT))
     try:
         if mode == "whisperx":
             progress(0.03, desc="Đang chuẩn bị audio YouTube tạm thời")
@@ -1248,8 +1252,9 @@ with gr.Blocks(
 
     search_box.change(search, [search_box, lesson, transcript_override], lesson)
     lesson_outputs = [
-        status, player, trans, parsed, lesson, url, progress_state, sentence_no,
-        target, transcript_override,
+        status, player, trans, parsed, lesson, url, progress_state, transcript_override,
+        practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out,
+        speech_status,
     ]
     lesson_change = lesson.change(
         select, [lesson, progress_state, transcript_override, show], lesson_outputs
@@ -1262,28 +1267,13 @@ with gr.Blocks(
         None,
         [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
     )
-    lesson_change.then(
-        refresh_lesson_panels_if_valid,
-        [status, lesson, progress_state, transcript_override],
-        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
-    )
-    open_event = open_btn.click(
+    open_btn.click(
         select, [lesson, progress_state, transcript_override, show], lesson_outputs
     )
-    open_event.then(
-        refresh_lesson_panels_if_valid,
-        [status, lesson, progress_state, transcript_override],
-        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
-    )
-    url_event = url_btn.click(
+    url_btn.click(
         open_url, [url, progress_state, transcript_override, show], lesson_outputs
     )
-    url_event.then(
-        refresh_lesson_panels_if_valid,
-        [status, lesson, progress_state, transcript_override],
-        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
-    )
-    online_fetch_event = online_fetch_btn.click(
+    online_fetch_btn.click(
         fetch_youtube_online,
         [url, online_mode, online_language, online_model, progress_state, transcript_override, show],
         [online_status, *lesson_outputs],
@@ -1298,11 +1288,6 @@ with gr.Blocks(
         lambda: ("", "", "", "", []),
         None,
         [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
-    )
-    online_fetch_event.then(
-        refresh_lesson_panels_if_valid,
-        [online_status, lesson, progress_state, transcript_override],
-        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
     )
     download_video_btn.click(
         download_youtube_ui,
@@ -1328,13 +1313,10 @@ with gr.Blocks(
         [practice_out, sentence_no, target],
     )
     practice_play.click(None, sentence_no, js="n => {window.EL?.playSentence(n); return []}")
-    sentence_change = sentence_no.change(
-        sentence_for, [lesson, sentence_no, transcript_override], target
-    )
-    sentence_change.then(
-        clear_sentence_feedback,
-        None,
-        [spoken, ai_out, pron_out, sr_out],
+    sentence_no.change(
+        sentence_selection,
+        [lesson, sentence_no, transcript_override],
+        [target, spoken, ai_out, pron_out, sr_out],
     )
     mark_btn.click(
         mark_sentence,
