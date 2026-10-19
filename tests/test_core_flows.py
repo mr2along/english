@@ -159,6 +159,8 @@ class AITutorTests(unittest.TestCase):
 
         self.assertIn("Do not provide IPA", prompt)
         self.assertIn("do not guess pronunciation", prompt)
+        self.assertIn("Skip pronouns, articles, auxiliary verbs", prompt)
+        self.assertIn("exactly one accurate part of speech", prompt)
 
     def test_known_vocabulary_uses_verified_entries_instead_of_small_model_guessing(self):
         with patch("core.ai_tutor._load_tutor_model") as load_model:
@@ -167,6 +169,17 @@ class AITutorTests(unittest.TestCase):
         self.assertIn("interjection", result)
         self.assertIn("sự thật", result)
         self.assertNotIn("thiên nhiên", result)
+        load_model.assert_not_called()
+
+    def test_lesson_two_vocabulary_uses_verified_entries_for_kids_and_day(self):
+        with patch("core.ai_tutor._load_tutor_model") as load_model:
+            result = explain("vocabulary", "hey kids how was your day I knew the")
+
+        self.assertIn("Kids", result)
+        self.assertIn("trẻ em", result)
+        self.assertIn("Day", result)
+        self.assertIn("ngày bận rộn", explain("vocabulary", "It was a busy day."))
+        self.assertNotIn("adjective / adjective", result)
         load_model.assert_not_called()
 
 

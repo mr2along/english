@@ -40,9 +40,13 @@ _GRAMMAR_TASK = (
     "grammatical English example and its Vietnamese translation."
 )
 _VOCABULARY_TASK = (
-    "Choose up to three useful words or phrases from this English sentence. For each, give its "
-    "part of speech, Vietnamese meaning, common usage, and one short English example with a "
-    "Vietnamese translation. Use only words present in the sentence. Do not provide IPA or "
+    "Choose up to three useful content words or phrases from this English sentence. Prefer nouns, "
+    "lexical verbs, adjectives, and adverbs. Skip pronouns, articles, auxiliary verbs, and ordinary "
+    "question words unless they are part of a useful phrase. Use only words present in the sentence. "
+    "For each item give exactly one accurate part of speech, a natural Vietnamese meaning, a short "
+    "usage note, and one grammatical English example followed by its natural Vietnamese translation. "
+    "Do not repeat part-of-speech labels, define an English word in English as its Vietnamese meaning, "
+    "or translate the example into English. If you are unsure, omit the item. Do not provide IPA or "
     "phonetic spellings; do not guess pronunciation. Be concise."
 )
 _CURATED_VOCABULARY = {
@@ -59,6 +63,48 @@ _CURATED_VOCABULARY = {
         "the truth = sự thật",
         "Tell me the truth.",
         "Hãy nói cho tôi biết sự thật.",
+    ),
+    "kids": (
+        "noun",
+        "trẻ em; bọn trẻ",
+        "Cách nói thân mật về trẻ em.",
+        "The kids are playing outside.",
+        "Bọn trẻ đang chơi ở ngoài.",
+    ),
+    "day": (
+        "noun",
+        "ngày",
+        "Dùng cho một ngày cụ thể hoặc khoảng thời gian ban ngày.",
+        "Have a nice day.",
+        "Chúc bạn một ngày vui vẻ.",
+    ),
+    "question": (
+        "noun",
+        "câu hỏi",
+        "a question = một câu hỏi",
+        "I have a question.",
+        "Tôi có một câu hỏi.",
+    ),
+    "answer": (
+        "noun / verb",
+        "câu trả lời; trả lời",
+        "Dùng cho lời đáp hoặc hành động đáp lại.",
+        "I know the answer.",
+        "Tôi biết câu trả lời.",
+    ),
+    "busy": (
+        "adjective",
+        "bận; bận rộn",
+        "Dùng khi có nhiều việc phải làm.",
+        "It was a busy day.",
+        "Đó là một ngày bận rộn.",
+    ),
+    "family": (
+        "noun",
+        "gia đình",
+        "Những người có quan hệ gia đình với nhau.",
+        "My family lives nearby.",
+        "Gia đình tôi sống gần đây.",
     ),
 }
 

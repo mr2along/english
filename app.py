@@ -55,6 +55,10 @@ EMPTY_PROGRESS = {"lessons": {}, "words": {}, "reviews": {}}
 MAX_TRANSCRIPT_SEGMENTS = 20_000
 MAX_TRANSCRIPT_TEXT_CHARS = 10_000
 GENERATED_FILE_TTL_SECONDS = 15 * 60
+AI_TUTOR_HELP = (
+    "Chọn câu trong transcript rồi yêu cầu Qwen giải thích bằng tiếng Việt. "
+    "Model được tải ở lần dùng đầu tiên."
+)
 
 
 def choices() -> list[tuple[str, str]]:
@@ -360,6 +364,42 @@ def practice(vid: str | None, progress_data: Any = None, transcript_override: An
     )
     index = next_item["index"]
     return message, index, sentence_for(vid, index, transcript_override)
+
+
+def refresh_lesson_panels(
+    vid: str | None, progress_data: Any = None, transcript_override: Any = None
+):
+    """Refresh lesson-specific panels after changing lesson or transcript."""
+    practice_message, index, target_text = practice(
+        vid, progress_data, transcript_override
+    )
+    return (
+        practice_message,
+        index,
+        target_text,
+        "",
+        AI_TUTOR_HELP,
+        "",
+        "",
+        "",
+        "",
+    )
+
+
+def refresh_lesson_panels_if_valid(
+    message: Any,
+    vid: str | None,
+    progress_data: Any = None,
+    transcript_override: Any = None,
+):
+    if str(message or "").lstrip().startswith("❌"):
+        return tuple(gr.update() for _ in range(9))
+    return refresh_lesson_panels(vid, progress_data, transcript_override)
+
+
+def clear_sentence_feedback():
+    """Clear feedback tied to a sentence when its selection changes."""
+    return "", AI_TUTOR_HELP, "", ""
 
 
 def grammar(vid: str | None, index: Any, transcript_override: Any = None) -> str:
@@ -1104,10 +1144,7 @@ with gr.Blocks(
             with gr.Row():
                 grammar_btn = gr.Button("📖 Phân tích Grammar", variant="primary")
                 vocab_btn = gr.Button("📚 Học Vocabulary", variant="primary")
-            ai_out = gr.Markdown(
-                "Chọn câu trong transcript rồi yêu cầu Qwen giải thích bằng tiếng Việt. "
-                "Model được tải ở lần dùng đầu tiên."
-            )
+            ai_out = gr.Markdown(AI_TUTOR_HELP)
         with gr.Tab("🧠 Quiz"):
             quiz_btn = gr.Button("🎯 Tạo câu hỏi mới", variant="primary")
             quiz_out = gr.Markdown()
@@ -1225,13 +1262,28 @@ with gr.Blocks(
         None,
         [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
     )
-    open_btn.click(
+    lesson_change.then(
+        refresh_lesson_panels_if_valid,
+        [status, lesson, progress_state, transcript_override],
+        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
+    )
+    open_event = open_btn.click(
         select, [lesson, progress_state, transcript_override, show], lesson_outputs
     )
-    url_btn.click(
+    open_event.then(
+        refresh_lesson_panels_if_valid,
+        [status, lesson, progress_state, transcript_override],
+        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
+    )
+    url_event = url_btn.click(
         open_url, [url, progress_state, transcript_override, show], lesson_outputs
     )
-    online_fetch_btn.click(
+    url_event.then(
+        refresh_lesson_panels_if_valid,
+        [status, lesson, progress_state, transcript_override],
+        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
+    )
+    online_fetch_event = online_fetch_btn.click(
         fetch_youtube_online,
         [url, online_mode, online_language, online_model, progress_state, transcript_override, show],
         [online_status, *lesson_outputs],
@@ -1246,6 +1298,11 @@ with gr.Blocks(
         lambda: ("", "", "", "", []),
         None,
         [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
+    )
+    online_fetch_event.then(
+        refresh_lesson_panels_if_valid,
+        [online_status, lesson, progress_state, transcript_override],
+        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
     )
     download_video_btn.click(
         download_youtube_ui,
@@ -1271,7 +1328,14 @@ with gr.Blocks(
         [practice_out, sentence_no, target],
     )
     practice_play.click(None, sentence_no, js="n => {window.EL?.playSentence(n); return []}")
-    sentence_no.change(sentence_for, [lesson, sentence_no, transcript_override], target)
+    sentence_change = sentence_no.change(
+        sentence_for, [lesson, sentence_no, transcript_override], target
+    )
+    sentence_change.then(
+        clear_sentence_feedback,
+        None,
+        [spoken, ai_out, pron_out, sr_out],
+    )
     mark_btn.click(
         mark_sentence,
         [lesson, sentence_no, progress_state, transcript_override],
@@ -1324,6 +1388,8 @@ with gr.Blocks(
         [sentence_no, target],
     )
     due_play_btn.click(None, sentence_no, js="n => {window.EL?.playSentence(n); return []}")
+    target.change(lambda _value: "", target, pron_out)
+    spoken.change(lambda _value: "", spoken, pron_out)
     pron_btn.click(pron_score, [target, spoken], pron_out)
     speech_btn.click(
         speech_to_text_ui,
@@ -1333,7 +1399,7 @@ with gr.Blocks(
         concurrency_limit=1,
         time_limit=1800,
     )
-    imp.click(
+    import_event = imp.click(
         import_transcript,
         [file, text, lesson, progress_state, transcript_override, show],
         [imp_status, parsed, trans, transcript_override, status, target, sentence_no],
@@ -1346,7 +1412,12 @@ with gr.Blocks(
         None,
         [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
     )
-    reset_import.click(
+    import_event.then(
+        refresh_lesson_panels_if_valid,
+        [imp_status, lesson, progress_state, transcript_override],
+        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
+    )
+    reset_import_event = reset_import.click(
         restore_library_transcript,
         [lesson, progress_state, show],
         [imp_status, parsed, trans, transcript_override, status, target, sentence_no],
@@ -1359,7 +1430,12 @@ with gr.Blocks(
         None,
         [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
     )
-    whisperx_import.click(
+    reset_import_event.then(
+        refresh_lesson_panels_if_valid,
+        [imp_status, lesson, progress_state, transcript_override],
+        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
+    )
+    whisperx_import_event = whisperx_import.click(
         import_transcript_text,
         [whisperx_json, lesson, progress_state, transcript_override, show],
         [imp_status, parsed, trans, transcript_override, status, target, sentence_no],
@@ -1371,6 +1447,11 @@ with gr.Blocks(
         lambda: ("", "", "", "", []),
         None,
         [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
+    )
+    whisperx_import_event.then(
+        refresh_lesson_panels_if_valid,
+        [imp_status, lesson, progress_state, transcript_override],
+        [practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out, speech_status],
     )
     download_transcript.click(
         export_transcript, [lesson, transcript_override], download_transcript
