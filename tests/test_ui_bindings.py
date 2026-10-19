@@ -15,7 +15,7 @@ class GradioBindingTests(unittest.TestCase):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         mismatches = []
-        event_methods = {"click", "change", "submit", "then", "load"}
+        event_methods = {"click", "change", "input", "submit", "then", "load"}
 
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):

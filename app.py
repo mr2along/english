@@ -1347,7 +1347,7 @@ with gr.Blocks(
         [practice_out, sentence_no, target],
     )
     practice_play.click(None, sentence_no, js="n => {window.EL?.playSentence(n); return []}")
-    sentence_no.change(
+    sentence_no.input(
         sentence_selection,
         [lesson, sentence_no, transcript_override],
         [target, spoken, ai_out, pron_out, sr_out],
