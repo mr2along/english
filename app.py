@@ -230,10 +230,9 @@ def select(
         else None
     )
     segments = effective_segments(vid, active_override)
-    lesson_value = (
-        gr.update(choices=lesson_choices(vid, active_override), value=vid)
-        if vid not in MAP
-        else vid
+    # Restore the full choice list after a filtered search result is selected.
+    lesson_value = gr.update(
+        choices=lesson_choices(vid, active_override), value=vid
     )
     return (
         lesson_status(vid, store.data, active_override),
@@ -278,7 +277,7 @@ def search(query: str | None, current: str | None, transcript_override: Any = No
         if not query or query in f"{item[0]} {item[1]}".casefold()
     ]
     values = {value for _, value in matches}
-    selected = current if current in values else (matches[0][1] if len(matches) == 1 else None)
+    selected = current if current in values else None
     return gr.update(choices=matches, value=selected)
 
 
@@ -290,6 +289,19 @@ def move(vid: str | None, direction: int):
         return ids[-1] if direction < 0 else ids[0]
     index = ids.index(vid)
     return ids[(index + direction) % len(ids)]
+
+
+def select_adjacent(
+    vid: str | None,
+    direction: int,
+    progress_data: Any = None,
+    transcript_override: Any = None,
+    show_script: bool = True,
+):
+    """Load a neighboring lesson directly, without chaining a dropdown update."""
+    return select(
+        move(vid, direction), progress_data, transcript_override, show_script
+    )
 
 
 def sentence_for(vid: str | None, index: Any, transcript_override: Any = None) -> str:
@@ -1256,7 +1268,7 @@ with gr.Blocks(
         practice_out, sentence_no, target, mark_out, ai_out, spoken, pron_out, sr_out,
         speech_status,
     ]
-    lesson_change = lesson.change(
+    lesson_change = lesson.input(
         select, [lesson, progress_state, transcript_override, show], lesson_outputs
     )
     lesson_change.then(
@@ -1297,9 +1309,31 @@ with gr.Blocks(
         concurrency_limit=1,
         time_limit=1800,
     )
-    # Changing the dropdown triggers lesson.change, which loads the next lesson.
-    prev.click(lambda value: move(value, -1), lesson, lesson)
-    nxt.click(lambda value: move(value, 1), lesson, lesson)
+    # Load adjacent lessons atomically; .input only responds to manual picker input.
+    prev_change = prev.click(
+        lambda value, progress_data, override, visible: select_adjacent(
+            value, -1, progress_data, override, visible
+        ),
+        [lesson, progress_state, transcript_override, show],
+        lesson_outputs,
+    )
+    nxt_change = nxt.click(
+        lambda value, progress_data, override, visible: select_adjacent(
+            value, 1, progress_data, override, visible
+        ),
+        [lesson, progress_state, transcript_override, show],
+        lesson_outputs,
+    )
+    for lesson_change_event in (prev_change, nxt_change):
+        lesson_change_event.then(
+            due_reviews,
+            [lesson, progress_state, transcript_override],
+            [due_summary, due_sentence],
+        ).then(
+            lambda: ("", "", "", "", []),
+            None,
+            [quiz_out, quiz_state, quiz_answer, quiz_feedback, quiz_history],
+        )
     show.change(
         lambda visible, vid, override: transcript_view(
             effective_segments(vid, override), visible
