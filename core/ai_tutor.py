@@ -45,6 +45,22 @@ _VOCABULARY_TASK = (
     "Vietnamese translation. Use only words present in the sentence. Do not provide IPA or "
     "phonetic spellings; do not guess pronunciation. Be concise."
 )
+_CURATED_VOCABULARY = {
+    "okay": (
+        "interjection",
+        "được, ừ, ổn",
+        "Dùng để đồng ý hoặc chuyển sang ý tiếp theo.",
+        "Okay, let's go.",
+        "Được rồi, chúng ta đi thôi.",
+    ),
+    "truth": (
+        "noun",
+        "sự thật; điều đúng với thực tế",
+        "the truth = sự thật",
+        "Tell me the truth.",
+        "Hãy nói cho tôi biết sự thật.",
+    ),
+}
 
 
 def _has_likely_finite_verb(sentence: str) -> bool:
@@ -69,6 +85,29 @@ def _fragment_explanation(sentence: str) -> str:
         "Hãy ghép với câu trước/sau nếu phụ đề đã chia nhỏ lời thoại.\n\n"
         "Ví dụ câu đầy đủ: **The truth is important.** — *Sự thật rất quan trọng.*"
     )
+
+
+def _curated_vocabulary_explanation(sentence: str) -> str | None:
+    found = []
+    seen = set()
+    for word in re.findall(r"[a-z]+(?:'[a-z]+)?", sentence.casefold()):
+        entry = _CURATED_VOCABULARY.get(word)
+        if entry and word not in seen:
+            seen.add(word)
+            found.append((word, entry))
+        if len(found) == 3:
+            break
+    if not found:
+        return None
+
+    lines = []
+    for word, (part_of_speech, meaning, usage, example, translation) in found:
+        lines.append(
+            f"- **{word.capitalize()}** *({part_of_speech})* — **{meaning}**. "
+            f"{usage} Ví dụ: *{example}* — *{translation}*"
+        )
+    return "\n".join(lines)
+
 
 def build_prompt(task: str, text: str, context: str = "") -> str:
     sentence = (text or "").strip()
@@ -118,6 +157,9 @@ def explain(task: str, sentence: str, max_new_tokens: int = 224) -> str:
             return _fragment_explanation(sentence)
         request = _GRAMMAR_TASK
     elif task == "vocabulary":
+        curated = _curated_vocabulary_explanation(sentence)
+        if curated:
+            return curated
         request = _VOCABULARY_TASK
     else:
         raise ValueError("Loại phân tích AI không được hỗ trợ.")

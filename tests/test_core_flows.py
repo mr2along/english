@@ -160,6 +160,15 @@ class AITutorTests(unittest.TestCase):
         self.assertIn("Do not provide IPA", prompt)
         self.assertIn("do not guess pronunciation", prompt)
 
+    def test_known_vocabulary_uses_verified_entries_instead_of_small_model_guessing(self):
+        with patch("core.ai_tutor._load_tutor_model") as load_model:
+            result = explain("vocabulary", "Okay. The truth.")
+
+        self.assertIn("interjection", result)
+        self.assertIn("sự thật", result)
+        self.assertNotIn("thiên nhiên", result)
+        load_model.assert_not_called()
+
 
 class MediaFlowTests(unittest.TestCase):
     def test_caption_connection_error_gives_proxy_setup_guidance(self):
