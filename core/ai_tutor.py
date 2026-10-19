@@ -107,6 +107,15 @@ _CURATED_VOCABULARY = {
         "Gia đình tôi sống gần đây.",
     ),
 }
+_CURATED_VOCABULARY_PHRASES = {
+    "thank you": (
+        "expression",
+        "cảm ơn (bạn)",
+        "Cách nói lịch sự để bày tỏ lòng biết ơn; có thể thêm for + lý do.",
+        "Thank you for your help.",
+        "Cảm ơn bạn đã giúp tôi.",
+    ),
+}
 
 
 def _has_likely_finite_verb(sentence: str) -> bool:
@@ -136,7 +145,14 @@ def _fragment_explanation(sentence: str) -> str:
 def _curated_vocabulary_explanation(sentence: str) -> str | None:
     found = []
     seen = set()
-    for word in re.findall(r"[a-z]+(?:'[a-z]+)?", sentence.casefold()):
+    normalized = sentence.casefold()
+    for phrase, entry in _CURATED_VOCABULARY_PHRASES.items():
+        if re.search(rf"(?<![a-z]){re.escape(phrase)}(?![a-z])", normalized):
+            found.append((phrase, entry))
+            seen.update(phrase.split())
+    for word in re.findall(r"[a-z]+(?:'[a-z]+)?", normalized):
+        if word in seen:
+            continue
         entry = _CURATED_VOCABULARY.get(word)
         if entry and word not in seen:
             seen.add(word)

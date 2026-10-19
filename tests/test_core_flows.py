@@ -171,6 +171,17 @@ class AITutorTests(unittest.TestCase):
         self.assertNotIn("thiên nhiên", result)
         load_model.assert_not_called()
 
+    def test_thank_you_uses_one_verified_expression_instead_of_model_guessing(self):
+        with patch("core.ai_tutor._load_tutor_model") as load_model:
+            result = explain("vocabulary", "thank you")
+
+        self.assertIn("Thank you", result)
+        self.assertIn("expression", result)
+        self.assertIn("cảm ơn", result)
+        self.assertEqual(result.count("**Thank you**"), 1)
+        self.assertNotIn("noun", result)
+        load_model.assert_not_called()
+
     def test_lesson_two_vocabulary_uses_verified_entries_for_kids_and_day(self):
         with patch("core.ai_tutor._load_tutor_model") as load_model:
             result = explain("vocabulary", "hey kids how was your day I knew the")
