@@ -19,7 +19,8 @@ from core.qwen_mapper import map_segments_detailed
 from core.transcript import normalize, parse_manual, render_transcript_html
 from core.whisperx_runner import make_payload, to_srt
 from core.youtube_download import download_youtube_video
-from core.youtube_transcript import transcribe_youtube_audio
+from core.youtube_transcript import fetch_youtube_transcript, transcribe_youtube_audio
+from core.ai_tutor import explain, vocabulary_request
 
 
 class TranscriptTests(unittest.TestCase):
@@ -137,7 +138,64 @@ class LearningFlowTests(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
 
+class AITutorTests(unittest.TestCase):
+    def test_grammar_fragment_does_not_claim_a_tense_or_call_the_model(self):
+        with patch("core.ai_tutor._load_tutor_model") as load_model:
+            result = explain("grammar", "Okay. The truth.")
+
+        self.assertIn("không thấy động từ hữu hạn", result)
+        self.assertIn("chưa thể xác định thì", result)
+        load_model.assert_not_called()
+
+    def test_participial_fragment_does_not_get_mistaken_for_a_finite_clause(self):
+        with patch("core.ai_tutor._load_tutor_model") as load_model:
+            result = explain("grammar", "Having been told the truth.")
+
+        self.assertIn("mảnh câu", result)
+        load_model.assert_not_called()
+
+    def test_vocabulary_prompt_does_not_ask_small_model_to_invent_ipa(self):
+        prompt = vocabulary_request("", sentence="Okay. The truth.")["prompt"]
+
+        self.assertIn("Do not provide IPA", prompt)
+        self.assertIn("do not guess pronunciation", prompt)
+
+
 class MediaFlowTests(unittest.TestCase):
+    def test_caption_connection_error_gives_proxy_setup_guidance(self):
+        class NetworkError(Exception):
+            def __str__(self):
+                return "HTTPSConnectionPool: Max retries exceeded (SSLEOFError)"
+
+        with patch("core.youtube_transcript._api", side_effect=NetworkError()):
+            with self.assertRaisesRegex(RuntimeError, "YOUTUBE_TRANSCRIPT_PROXY_USERNAME"):
+                fetch_youtube_transcript("dQw4w9WgXcQ")
+
+    def test_video_download_connection_error_gives_audio_proxy_guidance(self):
+        class NetworkError(Exception):
+            pass
+
+        class FakeYoutubeDL:
+            def __init__(self, _options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, _url, download=True):
+                raise NetworkError("HTTPSConnectionPool: Max retries exceeded (SSLEOFError)")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict(sys.modules, {"yt_dlp": SimpleNamespace(YoutubeDL=FakeYoutubeDL)}),
+                patch("core.youtube_download.DOWNLOAD_CACHE_DIR", Path(directory) / "downloads"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "YOUTUBE_AUDIO_PROXY"):
+                    download_youtube_video("dQw4w9WgXcQ")
+
     def test_youtube_download_returns_one_short_lived_video_file(self):
         video_id = "dQw4w9WgXcQ"
 

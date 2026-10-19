@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from core.library import video_id as parse_video_id
+from core.youtube_errors import connection_help
 from core.whisperx_runner import MAX_MEDIA_DURATION_SECONDS, MAX_MEDIA_FILE_BYTES
 
 
@@ -92,6 +93,9 @@ def fetch_youtube_transcript(value: str, language: str = "en") -> dict:
             raise RuntimeError(str(error)) from error
         if isinstance(error, ValueError):
             raise
+        help_message = connection_help(error, "captions")
+        if help_message:
+            raise RuntimeError(help_message) from error
         raise RuntimeError(f"Không lấy được caption YouTube: {error}") from error
 
     if not segments:
@@ -198,6 +202,9 @@ def transcribe_youtube_audio(
         except Exception as error:
             if isinstance(error, (RuntimeError, ValueError)):
                 raise
+            help_message = connection_help(error, "audio")
+            if help_message:
+                raise RuntimeError(help_message) from error
             raise RuntimeError(f"Không tải/chép lời được video YouTube: {error}") from error
 
     result.update(

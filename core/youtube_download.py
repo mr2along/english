@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from core.library import video_id as parse_video_id
+from core.youtube_errors import connection_help
 from core.whisperx_runner import MAX_MEDIA_DURATION_SECONDS, MAX_MEDIA_FILE_BYTES
 
 
@@ -151,6 +152,9 @@ def download_youtube_video(value: str, progress_callback: Callable | None = None
         except Exception as error:
             if isinstance(error, (RuntimeError, ValueError)):
                 raise
+            help_message = connection_help(error, "video")
+            if help_message:
+                raise RuntimeError(help_message) from error
             raise RuntimeError(f"Không tải được video YouTube: {error}") from error
 
     _schedule_cleanup(result_path)
