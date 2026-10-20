@@ -18,7 +18,7 @@ from core.progress import ProgressStore
 from core.qwen_mapper import map_segments_detailed
 from core.transcript import normalize, parse_manual, render_transcript_html
 from core.whisperx_runner import make_payload, to_srt
-from core.youtube_download import download_youtube_video
+from core.youtube_download import download_youtube_audio, download_youtube_video
 from core.youtube_transcript import fetch_youtube_transcript, transcribe_youtube_audio
 from core.ai_tutor import explain, vocabulary_request
 
@@ -281,6 +281,49 @@ class MediaFlowTests(unittest.TestCase):
             self.assertEqual(result["title"], "Sample lesson")
             self.assertEqual(output.read_bytes(), b"video bytes")
             self.assertEqual(output.suffix, ".mp4")
+
+    def test_youtube_audio_download_selects_audio_only_and_keeps_audio_file(self):
+        video_id = "dQw4w9WgXcQ"
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+                if options["format"] != "bestaudio[ext=m4a]/bestaudio":
+                    raise AssertionError("Audio-only download must request an audio format.")
+                self.path = Path(
+                    options["outtmpl"].replace("%(id)s.%(ext)s", f"{video_id}.m4a")
+                )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, _url, download=True):
+                info = {"id": video_id, "title": "Sample lesson", "duration": 12, "ext": "m4a"}
+                rejection = self.options["match_filter"](info)
+                if rejection:
+                    raise RuntimeError(rejection)
+                self.path.write_bytes(b"audio bytes")
+                return info
+
+            def prepare_filename(self, _info):
+                return str(self.path)
+
+        fake_module = SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            destination = Path(temporary_dir) / "downloads"
+            with (
+                patch.dict(sys.modules, {"yt_dlp": fake_module}),
+                patch("core.youtube_download.DOWNLOAD_CACHE_DIR", destination),
+                patch("core.youtube_download._schedule_cleanup"),
+            ):
+                result = download_youtube_audio(video_id)
+
+            output = Path(result["path"])
+            self.assertEqual(output.read_bytes(), b"audio bytes")
+            self.assertEqual(output.suffix, ".m4a")
 
     def test_youtube_whisperx_rejects_video_with_unknown_duration(self):
         class FakeYoutubeDL:

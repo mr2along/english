@@ -21,6 +21,7 @@ button.addEventListener("click", async () => {
 
     const helperPage = new URL("http://127.0.0.1:8765/download");
     helperPage.searchParams.set("url", tab.url);
+    helperPage.searchParams.set("type", "video");
     await chrome.tabs.create({ url: helperPage.toString() });
     status.textContent = "Đã mở bộ tải. Theo dõi tiến trình ở tab mới.";
   } catch (error) {

@@ -1244,11 +1244,13 @@ with gr.Blocks(
                     "Image Docker của repo đã được cấu hình cài WhisperX CPU khi deploy."
                 )
             gr.Markdown(
-                "Tải video qua một nguồn bạn được phép sử dụng, rồi chọn tệp video ở dưới. "
+                "Dùng audio hoặc video nguồn từ nội dung bạn được phép sử dụng. "
                 "Nếu Space truy cập được YouTube, nút này tải video đầy đủ vào ô WhisperX; bạn có thể "
-                "chạy trực tiếp hoặc tải bản đó về máy. Nếu Space báo lỗi mạng/SSL, tải video về thiết bị "
-                "bằng tiện ích English Lab trên máy rồi tải tệp lên đây. "
-                "[Cài tiện ích và bộ trợ giúp](https://github.com/mr2along/english/tree/feature/english-lab-v21/browser-extension). "
+                "chạy trực tiếp hoặc tải bản đó về máy. Nếu Space báo lỗi mạng/SSL, dùng bộ trợ giúp cục bộ "
+                "để tải audio riêng (tệp nhỏ hơn) hoặc video đầy đủ về thiết bị rồi chọn tệp tại đây. "
+                "Chrome máy tính dùng tiện ích; Android Chrome dùng Termux và trang localhost. "
+                "[Hướng dẫn Android](https://github.com/mr2along/english/blob/feature/english-lab-v21/browser-extension/README.md#android-chrome) · "
+                "[Hướng dẫn máy tính](https://github.com/mr2along/english/blob/feature/english-lab-v21/browser-extension/README.md#desktop-chrome). "
                 "Giới hạn 2 giờ / 512 MB."
             )
             whisperx_download_btn = gr.Button(

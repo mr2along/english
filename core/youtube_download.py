@@ -21,7 +21,7 @@ DOWNLOAD_TTL_SECONDS = 5 * 60
 MAX_DOWNLOAD_CACHE_AGE_SECONDS = 60 * 60
 DOWNLOAD_CACHE_DIR = Path(tempfile.gettempdir()) / "english-lab-youtube-downloads"
 VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".m4v", ".avi", ".flv"}
-AUDIO_SUFFIXES = {".m4a", ".mp3", ".opus", ".ogg", ".aac", ".wav"}
+AUDIO_SUFFIXES = {".m4a", ".mp3", ".opus", ".ogg", ".oga", ".aac", ".wav", ".webm", ".flac"}
 
 
 def _cleanup_downloads(now: float | None = None) -> None:
@@ -50,13 +50,16 @@ def _schedule_cleanup(path: Path, ttl_seconds: int = DOWNLOAD_TTL_SECONDS) -> No
     cleanup.start()
 
 
-def download_youtube_video(
+def _download_youtube_media(
     value: str,
     progress_callback: Callable | None = None,
     *,
     ttl_seconds: int = DOWNLOAD_TTL_SECONDS,
+    media_kind: str = "video",
 ) -> dict:
-    """Download one public, non-live YouTube video to a short-lived local file."""
+    """Download one public, non-live YouTube media file to a short-lived cache."""
+    if media_kind not in {"audio", "video"}:
+        raise ValueError("Loại media chưa được hỗ trợ.")
     try:
         ttl_seconds = int(ttl_seconds)
     except (TypeError, ValueError, OverflowError) as error:
@@ -81,9 +84,9 @@ def download_youtube_video(
             total = status.get("total_bytes") or status.get("total_bytes_estimate")
             downloaded = status.get("downloaded_bytes") or 0
             fraction = min(1.0, downloaded / total) if total else 0.0
-            progress_callback(fraction, "Đang tải video YouTube")
+            progress_callback(fraction, f"Đang tải {media_kind} YouTube")
         elif status.get("status") == "finished":
-            progress_callback(1.0, "Đã tải video · đang chuẩn bị file tải xuống")
+            progress_callback(1.0, f"Đã tải {media_kind} · đang chuẩn bị file tải xuống")
 
     def limit_video(info: dict, *, incomplete: bool = False):
         if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
@@ -91,22 +94,26 @@ def download_youtube_video(
         try:
             duration = float(info.get("duration"))
         except (TypeError, ValueError):
-            return "Không xác định được thời lượng video nên đã dừng để bảo vệ tài nguyên Space."
+            return "Không xác định được thời lượng media nên đã dừng để bảo vệ tài nguyên."
         if duration <= 0:
-            return "Video không có thời lượng hợp lệ."
+            return "Media không có thời lượng hợp lệ."
         if duration > MAX_MEDIA_DURATION_SECONDS:
-            return "Video dài hơn giới hạn 2 giờ cho mỗi lần tải."
+            return "Media dài hơn giới hạn 2 giờ cho mỗi lần tải."
         size = info.get("filesize") or info.get("filesize_approx")
         try:
             if size is not None and int(size) > MAX_MEDIA_FILE_BYTES:
-                return "Video vượt giới hạn dung lượng 512 MB."
+                return "Media vượt giới hạn dung lượng 512 MB."
         except (TypeError, ValueError, OverflowError):
             pass
         return None
 
     with tempfile.TemporaryDirectory(prefix="english-lab-video-") as temporary_dir:
         options = {
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "format": (
+                "bestaudio[ext=m4a]/bestaudio"
+                if media_kind == "audio"
+                else "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+            ),
             "outtmpl": str(Path(temporary_dir) / "%(id)s.%(ext)s"),
             "noplaylist": True,
             "quiet": True,
@@ -133,44 +140,43 @@ def download_youtube_video(
                     raise RuntimeError("YouTube trả về video không khớp với URL đã nhập.")
                 expected_path = Path(downloader.prepare_filename(info))
 
+            expected_suffixes = AUDIO_SUFFIXES if media_kind == "audio" else VIDEO_SUFFIXES
             candidates = [
                 path
                 for path in Path(temporary_dir).glob(f"{video_id}.*")
                 if path.is_file()
-                and path.suffix.lower() in VIDEO_SUFFIXES
+                and path.suffix.lower() in expected_suffixes
                 and not path.name.endswith((".part", ".ytdl"))
             ]
-            if expected_path.is_file() and expected_path.suffix.lower() in VIDEO_SUFFIXES:
-                video_path = expected_path
+            if expected_path.is_file() and expected_path.suffix.lower() in expected_suffixes:
+                media_path = expected_path
             elif candidates:
-                video_path = max(candidates, key=lambda item: item.stat().st_size)
+                media_path = max(candidates, key=lambda item: item.stat().st_size)
             else:
-                raise RuntimeError("yt-dlp không tạo được file video có thể tải xuống.")
+                raise RuntimeError(f"yt-dlp không tạo được file {media_kind} có thể tải xuống.")
 
-            size = video_path.stat().st_size
+            size = media_path.stat().st_size
             if size <= 0:
-                raise RuntimeError("File video tải về đang rỗng.")
+                raise RuntimeError(f"File {media_kind} tải về đang rỗng.")
             if size > MAX_MEDIA_FILE_BYTES:
-                raise RuntimeError("Video vượt giới hạn dung lượng 512 MB.")
-            if video_path.suffix.lower() in AUDIO_SUFFIXES:
-                raise RuntimeError("YouTube chỉ trả về audio, không tìm thấy luồng video.")
+                raise RuntimeError(f"{media_kind.title()} vượt giới hạn dung lượng 512 MB.")
 
             title = str(info.get("title") or f"YouTube {video_id}").strip()
             safe_title = re.sub(r"[^\w .()-]+", "_", title, flags=re.UNICODE).strip(" .")
             safe_title = (safe_title or "youtube_video")[:80]
             DOWNLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             result_path = DOWNLOAD_CACHE_DIR / (
-                f"{safe_title} [{video_id}] {uuid.uuid4().hex[:8]}{video_path.suffix.lower()}"
+                f"{safe_title} [{video_id}] {uuid.uuid4().hex[:8]}{media_path.suffix.lower()}"
             )
-            shutil.move(str(video_path), result_path)
+            shutil.move(str(media_path), result_path)
             duration = float(info.get("duration") or 0)
         except Exception as error:
             if isinstance(error, (RuntimeError, ValueError)):
                 raise
-            help_message = connection_help(error, "video")
+            help_message = connection_help(error, media_kind)
             if help_message:
                 raise RuntimeError(help_message) from error
-            raise RuntimeError(f"Không tải được video YouTube: {error}") from error
+            raise RuntimeError(f"Không tải được {media_kind} YouTube: {error}") from error
 
     _schedule_cleanup(result_path, ttl_seconds)
     if progress_callback:
@@ -182,3 +188,27 @@ def download_youtube_video(
         "duration": duration,
         "size_bytes": size,
     }
+
+
+def download_youtube_video(
+    value: str,
+    progress_callback: Callable | None = None,
+    *,
+    ttl_seconds: int = DOWNLOAD_TTL_SECONDS,
+) -> dict:
+    """Download one public, non-live YouTube video to a short-lived local file."""
+    return _download_youtube_media(
+        value, progress_callback, ttl_seconds=ttl_seconds, media_kind="video"
+    )
+
+
+def download_youtube_audio(
+    value: str,
+    progress_callback: Callable | None = None,
+    *,
+    ttl_seconds: int = DOWNLOAD_TTL_SECONDS,
+) -> dict:
+    """Download only the audio stream, without the video stream."""
+    return _download_youtube_media(
+        value, progress_callback, ttl_seconds=ttl_seconds, media_kind="audio"
+    )
