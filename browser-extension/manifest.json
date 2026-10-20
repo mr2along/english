@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "English Lab · YouTube Video Download",
+  "description": "Tải video YouTube được phép sử dụng về máy để đưa vào WhisperX.",
+  "version": "1.0.0",
+  "permissions": ["activeTab"],
+  "host_permissions": [
+    "https://youtube.com/*",
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://youtu.be/*"
+  ],
+  "action": {
+    "default_title": "Tải video YouTube cho English Lab",
+    "default_popup": "popup.html"
+  }
+}

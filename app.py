@@ -852,6 +852,29 @@ def download_youtube_ui(value: str | None, progress=gr.Progress(track_tqdm=True)
         return f"❌ {html.escape(str(error))}", None
 
 
+def download_youtube_for_whisperx_ui(
+    value: str | None, progress=gr.Progress(track_tqdm=True)
+):
+    """Download a full source video and load it into the WhisperX file picker."""
+    try:
+        result = download_youtube_video(
+            value or "",
+            progress_callback=lambda fraction, description: progress(
+                fraction, desc=description
+            ),
+            ttl_seconds=60 * 60,
+        )
+        size_mb = result["size_bytes"] / (1024 * 1024)
+        message = (
+            f"✅ Đã tải video **{html.escape(result['title'])}** · "
+            f"{format_time(result['duration'])} · {size_mb:.1f} MB. "
+            "Tệp sẵn sàng trong WhisperX; link tải có hiệu lực khoảng 60 phút."
+        )
+        return message, result["path"], result["video_id"], result["title"]
+    except Exception as error:
+        return f"❌ {html.escape(str(error))}", None, gr.update(), gr.update()
+
+
 def restore_library_transcript(
     vid: str | None, progress_data: Any = None, show_script: bool = True
 ):
@@ -963,12 +986,6 @@ body{background:#f8fafc}
 .browser-transcript-tools button{border:1px solid #cbd5e1;border-radius:10px;background:#fff;color:#1e293b;padding:9px 12px;font-weight:700;cursor:pointer}
 .browser-transcript-tools button:hover{background:#eff6ff;border-color:#93c5fd}
 .browser-transcript-message{min-width:0;overflow-wrap:anywhere}
-.browser-audio-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0;padding:12px;border:1px solid #cbd5e1;border-radius:12px;background:#f8fafc}
-.browser-audio-tools button,.browser-audio-tools a{border:1px solid #cbd5e1;border-radius:10px;background:#fff;color:#1e293b;padding:9px 12px;font-weight:700;text-decoration:none;cursor:pointer}
-.browser-audio-tools button:hover,.browser-audio-tools a:hover{background:#eff6ff;border-color:#93c5fd}
-.browser-audio-tools button:disabled{opacity:.55;cursor:not-allowed}
-.browser-audio-preview{flex-basis:100%;width:100%;max-width:620px}
-.browser-audio-message{flex-basis:100%;min-width:0;overflow-wrap:anywhere;color:#475569;font-size:13px}
 .repeat-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0;padding:10px 12px;border:1px solid #e2e8f0;border-radius:14px;background:#fff}
 .repeat-label{font-size:12px;color:#64748b;font-weight:700}
 .repeat-choice button{min-width:48px;min-height:42px}
@@ -1004,71 +1021,7 @@ const loadApi=()=>{
 const call=(name,...args)=>{try{if(player?.[name])return player[name](...args)}catch(e){}return undefined};
 const syncSentence=k=>{let input=document.querySelector('#sentence-no input');if(!input)return;const setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')?.set;if(setter)setter.call(input,String(k));else input.value=String(k);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}))};
 const wireClipboardPaste=()=>document.querySelectorAll('.browser-transcript-paste:not([data-wired])').forEach(button=>{button.dataset.wired='1';button.addEventListener('click',async()=>{let message=button.parentElement?.querySelector('.browser-transcript-message');const report=value=>{if(message)message.textContent=value};try{if(!navigator.clipboard?.readText)throw new Error('clipboard unavailable');const copied=await navigator.clipboard.readText();if(!copied.trim()){report('Clipboard đang trống. Hãy sao chép transcript từ YouTube trước.');return}const input=document.querySelector('#manual-transcript-text textarea');if(!input)throw new Error('transcript input unavailable');const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value')?.set;if(setter)setter.call(input,copied);else input.value=copied;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));report(`Đã dán ${copied.length.toLocaleString()} ký tự. Bấm “Nạp transcript vào phiên này” để sử dụng.`)}catch(e){report('Không đọc được clipboard. Hãy đặt con trỏ trong ô transcript rồi nhấn Ctrl+V hoặc ⌘V.')}})});
-const wireBrowserAudio=()=>document.querySelectorAll('.browser-audio-start:not([data-wired])').forEach(startButton=>{
- const box=startButton.closest('.browser-audio-tools');
- const stopButton=box?.querySelector('.browser-audio-stop');
- const downloadLink=box?.querySelector('.browser-audio-download');
- const preview=box?.querySelector('.browser-audio-preview');
- const message=box?.querySelector('.browser-audio-message');
- if(!box||!stopButton||!downloadLink||!preview||!message)return;
- startButton.dataset.wired='1';
- let stream=null,recorder=null,parts=[],bytes=0,captureTimer=null,finishing=false,tooLarge=false,objectUrl=null;
- const report=value=>{message.textContent=value};
- const release=()=>{if(captureTimer){clearTimeout(captureTimer);captureTimer=null}if(stream){stream.getTracks().forEach(track=>{try{track.stop()}catch(e){}});stream=null}};
- const finish=()=>{
-  if(finishing)return;
-  if(!recorder||recorder.state==='inactive'){release();startButton.disabled=false;stopButton.disabled=true;return}
-  finishing=true;stopButton.disabled=true;
-  try{recorder.stop()}catch(e){release();startButton.disabled=false;report('Không thể kết thúc bản ghi. Hãy thử lại hoặc tải audio thủ công.');finishing=false}
- };
- const saveRecording=()=>{
-  release();startButton.disabled=false;stopButton.disabled=true;
-  if(tooLarge){report('Bản ghi vượt 512 MB nên đã bị loại bỏ. Hãy thu video ngắn hơn hoặc dùng file audio nhỏ hơn.');parts=[];return}
-  if(!parts.length||!bytes){report('Không nhận được audio. Hãy kiểm tra đã bật “Share tab audio” và video có tiếng.');parts=[];return}
-  const mime=(recorder?.mimeType||parts.find(part=>part.type)?.type||'audio/webm').toLowerCase();
-  const ext=mime.includes('ogg')?'.ogg':mime.includes('mp4')?'.mp4':'.webm';
-  const blob=new Blob(parts,{type:mime});parts=[];
-  if(!blob.size){report('Bản ghi rỗng. Hãy phát video có tiếng rồi thu lại.');return}
-  if(objectUrl)URL.revokeObjectURL(objectUrl);
-  objectUrl=URL.createObjectURL(blob);preview.src=objectUrl;preview.hidden=false;
-  downloadLink.href=objectUrl;downloadLink.download='youtube-tab-audio-'+Date.now()+ext;downloadLink.hidden=false;
-  const file=new File([blob],downloadLink.download,{type:mime,lastModified:Date.now()});
-  try{
-   const input=document.querySelector('#whisperx-audio-file input[type="file"]');
-   if(!input)throw new Error('WhisperX file input unavailable');
-   const transfer=new DataTransfer();transfer.items.add(file);input.files=transfer.files;
-   input.dispatchEvent(new Event('change',{bubbles:true}));
-   report('Đã thu '+(blob.size/1024/1024).toFixed(1)+' MB. Nghe thử để kiểm tra tiếng và câu; file đang được nạp lên Space. Nếu tên file không xuất hiện bên dưới, tải file này rồi chọn thủ công.');
-  }catch(e){report('Đã thu audio. Hãy nghe thử, tải file bằng nút bên dưới rồi chọn file đó trong ô WhisperX.');}
- };
- startButton.addEventListener('click',async()=>{
-  if(!navigator.mediaDevices?.getDisplayMedia||!window.MediaRecorder){report('Trình duyệt này chưa hỗ trợ thu audio tab. Hãy mở bằng Chrome/Edge mới hoặc tải file audio lên.');return}
-  startButton.disabled=true;report('Chọn tab English Lab đang phát video và bật “Share tab audio” trong hộp thoại chia sẻ.');
-  try{
-   stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true,preferCurrentTab:true});
-   const audioTracks=stream.getAudioTracks();
-   if(!audioTracks.length){release();startButton.disabled=false;report('Trình duyệt không cấp audio track. Hãy chọn tab đang phát video, bật “Share tab audio”, rồi thử lại.');return}
-   parts=[];bytes=0;finishing=false;tooLarge=false;
-   const candidates=['audio/webm;codecs=opus','audio/ogg;codecs=opus','audio/mp4'];
-   const mimeType=candidates.find(type=>MediaRecorder.isTypeSupported?.(type));
-   recorder=new MediaRecorder(new MediaStream(audioTracks),mimeType?{mimeType}:undefined);
-   recorder.addEventListener('dataavailable',event=>{
-    if(!event.data?.size)return;
-    if(bytes+event.data.size>512*1024*1024){tooLarge=true;report('Bản ghi đã chạm giới hạn 512 MB; đang dừng thu.');finish();return}
-    bytes+=event.data.size;parts.push(event.data);
-   });
-   recorder.addEventListener('stop',saveRecording,{once:true});
-   recorder.addEventListener('error',()=>{report('Trình duyệt gặp lỗi khi ghi audio. Hãy thử lại hoặc tải file audio thủ công.');finish()},{once:true});
-   stream.getTracks().forEach(track=>track.addEventListener('ended',()=>{if(recorder?.state==='recording'){report('Chia sẻ tab đã dừng; đang hoàn tất bản ghi.');finish()}},{once:true}));
-   recorder.start(1000);stopButton.disabled=false;
-   try{window.EL?.back()}catch(e){}
-   report('Đang thu audio. Video đã được đưa về đầu; hãy bấm phát, để chạy hết câu/video rồi bấm “Dừng thu”. Giới hạn 2 giờ / 512 MB.');
-   captureTimer=setTimeout(()=>{report('Đã đạt giới hạn 2 giờ; đang kết thúc bản ghi.');finish()},2*60*60*1000);
-  }catch(e){release();startButton.disabled=false;stopButton.disabled=true;report('Không bắt đầu được chia sẻ audio. Hãy cho phép chia sẻ tab và bật “Share tab audio”, hoặc tải file audio lên thủ công.');}
- });
- stopButton.addEventListener('click',()=>{report('Đang hoàn tất audio…');finish()});
-});
-const wire=()=>{let next=[...document.querySelectorAll('.line')];if(n.length&&(next.length!==n.length||next[0]!==n[0])){clear();i=-1}n=next;n.forEach((b,k)=>{if(!b.dataset.wired){b.dataset.wired=1;b.onclick=()=>go(k)}});if(i>=0&&i<n.length){n[i].classList.add('active');n[i].setAttribute('aria-pressed','true')}wireClipboardPaste();wireBrowserAudio();ready()};
+const wire=()=>{let next=[...document.querySelectorAll('.line')];if(n.length&&(next.length!==n.length||next[0]!==n[0])){clear();i=-1}n=next;n.forEach((b,k)=>{if(!b.dataset.wired){b.dataset.wired=1;b.onclick=()=>go(k)}});if(i>=0&&i<n.length){n[i].classList.add('active');n[i].setAttribute('aria-pressed','true')}wireClipboardPaste();ready()};
 const segment=()=>{let b=n[i];return b?{start:+b.dataset.start,end:+b.dataset.end}:null};
 const checkEnd=ended=>{if(!active||i<0||(!ended&&call('getPlayerState')!==1))return;let s=segment();if(!s||!(s.end>s.start))return;let t=call('getCurrentTime');if(!ended&&(typeof t!=='number'||t<s.end-0.02))return;if(repeatsLeft>0){repeatsLeft--;call('seekTo',s.start,true);call('playVideo')}else{active=false;call('seekTo',s.end,true);call('pauseVideo')}};
 const go=k=>{if(!n.length)return;i=Math.max(0,Math.min(k,n.length-1));n.forEach(x=>{x.classList.remove('active');x.setAttribute('aria-pressed','false')});let b=n[i];b.classList.add('active');b.setAttribute('aria-pressed','true');b.scrollIntoView({behavior:'smooth',block:'center'});syncSentence(i);repeatsLeft=Math.max(0,repeatCount-1);active=true;call('seekTo',+b.dataset.start,true);call('playVideo')};
@@ -1278,12 +1231,11 @@ with gr.Blocks(
             gr.Markdown(
                 "File tải về dùng transcript đang hiển thị, kể cả transcript đã nạp trong phiên này."
             )
-        with gr.Tab("🎙️ WhisperX"):
+        with gr.Tab("🎙️ WhisperX · video/audio"):
             if find_spec("whisperx"):
                 gr.Markdown(
-                    "Tải audio/video lên để nhận dạng lời thoại và căn timestamp đến từng từ. "
-                    "Có thể thu âm thanh của tab YouTube ngay trong trình duyệt, rồi dùng WhisperX "
-                    "để kiểm tra transcript và tạo timestamp câu/từ theo audio."
+                    "Dùng video gốc đã tải về máy hoặc tệp audio để nhận dạng lời thoại và căn timestamp "
+                    "đến từng từ. WhisperX tự trích audio từ video; timestamp tính từ đầu tệp."
                 )
             else:
                 gr.Markdown(
@@ -1292,24 +1244,22 @@ with gr.Blocks(
                     "Image Docker của repo đã được cấu hình cài WhisperX CPU khi deploy."
                 )
             gr.Markdown(
-                "**Thu audio YouTube:** bấm bắt đầu thu, chọn tab English Lab đang phát video và bật "
-                "**Share tab audio**. Video tự về đầu; phát hết đoạn cần căn rồi dừng thu. Nghe thử bản ghi "
-                "để xác nhận có tiếng và đúng câu; file sẽ được tải lên Space để xử lý. Bấm **Chạy WhisperX** "
-                "để tạo transcript và căn thời gian theo audio, xem lại kết quả rồi bấm "
-                "**Dùng kết quả này cho bài đang chọn**. Tối đa 2 giờ / 512 MB."
+                "Tải video qua một nguồn bạn được phép sử dụng, rồi chọn tệp video ở dưới. "
+                "Nếu Space truy cập được YouTube, nút này tải video đầy đủ vào ô WhisperX; bạn có thể "
+                "chạy trực tiếp hoặc tải bản đó về máy. Nếu Space báo lỗi mạng/SSL, tải video về thiết bị "
+                "bằng tiện ích English Lab trên máy rồi tải tệp lên đây. "
+                "[Cài tiện ích và bộ trợ giúp](https://github.com/mr2along/english/tree/feature/english-lab-v21/browser-extension). "
+                "Giới hạn 2 giờ / 512 MB."
             )
-            gr.HTML(
-                "<div class='browser-audio-tools'>"
-                "<button type='button' class='browser-audio-start'>🔊 Bắt đầu thu audio tab YouTube</button>"
-                "<button type='button' class='browser-audio-stop' disabled>⏹ Dừng thu &amp; nạp audio</button>"
-                "<a class='browser-audio-download' hidden>⬇ Tải audio đã thu</a>"
-                "<audio class='browser-audio-preview' controls hidden></audio>"
-                "<span class='browser-audio-message' aria-live='polite'></span></div>"
+            whisperx_download_btn = gr.Button(
+                "⬇️ Tải video gốc từ URL vào WhisperX", variant="secondary"
             )
+            whisperx_download_status = gr.Markdown()
             whisperx_audio = gr.File(
-                label="Audio / video cần chép lời",
+                label="Video / audio gốc đã tải về máy",
                 file_types=sorted(SUPPORTED_AUDIO_SUFFIXES),
                 type="filepath",
+                interactive=True,
                 elem_id="whisperx-audio-file",
             )
             with gr.Row(elem_classes="whisperx-id-row"):
@@ -1422,6 +1372,14 @@ with gr.Blocks(
         download_youtube_ui,
         url,
         [download_video_status, download_video_file],
+        concurrency_id="youtube-download",
+        concurrency_limit=1,
+        time_limit=1800,
+    )
+    whisperx_download_btn.click(
+        download_youtube_for_whisperx_ui,
+        url,
+        [whisperx_download_status, whisperx_audio, whisperx_video_id, whisperx_title],
         concurrency_id="youtube-download",
         concurrency_limit=1,
         time_limit=1800,

@@ -60,6 +60,7 @@ jobs:
             --repo-type space \
             --exclude=".git/*" \
             --exclude=".github/*" \
+            --exclude="browser-extension/**" \
             --exclude="__pycache__/*" \
             --exclude="*.pyc" \
             --exclude=".env*" \

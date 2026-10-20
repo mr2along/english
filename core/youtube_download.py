@@ -18,6 +18,7 @@ from core.whisperx_runner import MAX_MEDIA_DURATION_SECONDS, MAX_MEDIA_FILE_BYTE
 
 
 DOWNLOAD_TTL_SECONDS = 5 * 60
+MAX_DOWNLOAD_CACHE_AGE_SECONDS = 60 * 60
 DOWNLOAD_CACHE_DIR = Path(tempfile.gettempdir()) / "english-lab-youtube-downloads"
 VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".m4v", ".avi", ".flv"}
 AUDIO_SUFFIXES = {".m4a", ".mp3", ".opus", ".ogg", ".aac", ".wav"}
@@ -28,26 +29,40 @@ def _cleanup_downloads(now: float | None = None) -> None:
     DOWNLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for path in DOWNLOAD_CACHE_DIR.iterdir():
         try:
-            if path.is_file() and now - path.stat().st_mtime > DOWNLOAD_TTL_SECONDS:
+            if (
+                path.is_file()
+                and now - path.stat().st_mtime > MAX_DOWNLOAD_CACHE_AGE_SECONDS
+            ):
                 path.unlink()
         except OSError:
             continue
 
 
-def _schedule_cleanup(path: Path) -> None:
+def _schedule_cleanup(path: Path, ttl_seconds: int = DOWNLOAD_TTL_SECONDS) -> None:
     def remove_file():
         try:
             path.unlink(missing_ok=True)
         except OSError:
             pass
 
-    cleanup = threading.Timer(DOWNLOAD_TTL_SECONDS, remove_file)
+    cleanup = threading.Timer(ttl_seconds, remove_file)
     cleanup.daemon = True
     cleanup.start()
 
 
-def download_youtube_video(value: str, progress_callback: Callable | None = None) -> dict:
+def download_youtube_video(
+    value: str,
+    progress_callback: Callable | None = None,
+    *,
+    ttl_seconds: int = DOWNLOAD_TTL_SECONDS,
+) -> dict:
     """Download one public, non-live YouTube video to a short-lived local file."""
+    try:
+        ttl_seconds = int(ttl_seconds)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("Thời hạn lưu video không hợp lệ.") from error
+    if not 60 <= ttl_seconds <= MAX_DOWNLOAD_CACHE_AGE_SECONDS:
+        raise ValueError("Thời hạn lưu video phải nằm trong khoảng 1–60 phút.")
     video_id = parse_video_id(value or "")
     if not video_id:
         raise ValueError("Dán URL YouTube hợp lệ hoặc Video ID 11 ký tự.")
@@ -157,7 +172,7 @@ def download_youtube_video(value: str, progress_callback: Callable | None = None
                 raise RuntimeError(help_message) from error
             raise RuntimeError(f"Không tải được video YouTube: {error}") from error
 
-    _schedule_cleanup(result_path)
+    _schedule_cleanup(result_path, ttl_seconds)
     if progress_callback:
         progress_callback(1.0, "Hoàn tất")
     return {
