@@ -161,21 +161,39 @@ def parse_manual(raw: str, video_id: str | None = None) -> list[dict[str, Any]]:
     if out:
         return normalize(out)
 
-    # Plain text format: [m:ss] caption.
-    for line in lines:
-        line = line.strip()
-        match = re.match(
-            r"^\[?(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\]?\s*(.*)$",
-            line,
-        )
-        if not match:
-            continue
-        start = _seconds(match.group(1))
-        caption = _clean_caption(match.group(2))
-        if caption and math.isfinite(start):
+    # YouTube's transcript panel commonly copies each timestamp and caption
+    # onto separate lines. Also accept the compact ``[m:ss] caption`` form.
+    current: dict[str, Any] | None = None
+    timestamp_line = re.compile(
+        r"^[\[(]?(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)[\])]?(?:\s+(.*))?$"
+    )
+
+    def append_current() -> None:
+        if current is None:
+            return
+        caption = _clean_caption(" ".join(current["text"]))
+        if caption and math.isfinite(current["start"]):
             out.append(
-                {"index": len(out), "start": start, "duration": 0.0, "text": caption}
+                {
+                    "index": len(out),
+                    "start": current["start"],
+                    "duration": 0.0,
+                    "text": caption,
+                }
             )
+
+    for source_line in lines:
+        line = source_line.strip()
+        match = timestamp_line.match(line)
+        if match:
+            append_current()
+            start = _seconds(match.group(1))
+            caption = _clean_caption(match.group(2) or "")
+            current = {"start": start, "text": [caption] if caption else []}
+        elif current is not None and line:
+            current["text"].append(line)
+    append_current()
+
     for index in range(len(out) - 1):
         out[index]["duration"] = max(0.0, out[index + 1]["start"] - out[index]["start"])
     return normalize(out)

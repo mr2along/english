@@ -959,6 +959,10 @@ body{background:#f8fafc}
 .time{flex:0 0 64px;color:#2563eb;font:700 12px ui-monospace,monospace;padding-top:2px}
 .empty{padding:24px;color:#64748b;text-align:center}
 .footer-note{text-align:center;color:#94a3b8;font-size:12px;margin-top:20px}
+.browser-transcript-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0;color:#64748b;font-size:13px}
+.browser-transcript-tools button{border:1px solid #cbd5e1;border-radius:10px;background:#fff;color:#1e293b;padding:9px 12px;font-weight:700;cursor:pointer}
+.browser-transcript-tools button:hover{background:#eff6ff;border-color:#93c5fd}
+.browser-transcript-message{min-width:0;overflow-wrap:anywhere}
 .repeat-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0;padding:10px 12px;border:1px solid #e2e8f0;border-radius:14px;background:#fff}
 .repeat-label{font-size:12px;color:#64748b;font-weight:700}
 .repeat-choice button{min-width:48px;min-height:42px}
@@ -993,7 +997,8 @@ const loadApi=()=>{
 };
 const call=(name,...args)=>{try{if(player?.[name])return player[name](...args)}catch(e){}return undefined};
 const syncSentence=k=>{let input=document.querySelector('#sentence-no input');if(!input)return;const setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')?.set;if(setter)setter.call(input,String(k));else input.value=String(k);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}))};
-const wire=()=>{let next=[...document.querySelectorAll('.line')];if(n.length&&(next.length!==n.length||next[0]!==n[0])){clear();i=-1}n=next;n.forEach((b,k)=>{if(!b.dataset.wired){b.dataset.wired=1;b.onclick=()=>go(k)}});if(i>=0&&i<n.length){n[i].classList.add('active');n[i].setAttribute('aria-pressed','true')}ready()};
+const wireClipboardPaste=()=>document.querySelectorAll('.browser-transcript-paste:not([data-wired])').forEach(button=>{button.dataset.wired='1';button.addEventListener('click',async()=>{let message=button.parentElement?.querySelector('.browser-transcript-message');const report=value=>{if(message)message.textContent=value};try{if(!navigator.clipboard?.readText)throw new Error('clipboard unavailable');const copied=await navigator.clipboard.readText();if(!copied.trim()){report('Clipboard đang trống. Hãy sao chép transcript từ YouTube trước.');return}const input=document.querySelector('#manual-transcript-text textarea');if(!input)throw new Error('transcript input unavailable');const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value')?.set;if(setter)setter.call(input,copied);else input.value=copied;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));report(`Đã dán ${copied.length.toLocaleString()} ký tự. Bấm “Nạp transcript vào phiên này” để sử dụng.`)}catch(e){report('Không đọc được clipboard. Hãy đặt con trỏ trong ô transcript rồi nhấn Ctrl+V hoặc ⌘V.')}})});
+const wire=()=>{let next=[...document.querySelectorAll('.line')];if(n.length&&(next.length!==n.length||next[0]!==n[0])){clear();i=-1}n=next;n.forEach((b,k)=>{if(!b.dataset.wired){b.dataset.wired=1;b.onclick=()=>go(k)}});if(i>=0&&i<n.length){n[i].classList.add('active');n[i].setAttribute('aria-pressed','true')}wireClipboardPaste();ready()};
 const segment=()=>{let b=n[i];return b?{start:+b.dataset.start,end:+b.dataset.end}:null};
 const checkEnd=ended=>{if(!active||i<0||(!ended&&call('getPlayerState')!==1))return;let s=segment();if(!s||!(s.end>s.start))return;let t=call('getCurrentTime');if(!ended&&(typeof t!=='number'||t<s.end-0.02))return;if(repeatsLeft>0){repeatsLeft--;call('seekTo',s.start,true);call('playVideo')}else{active=false;call('seekTo',s.end,true);call('pauseVideo')}};
 const go=k=>{if(!n.length)return;i=Math.max(0,Math.min(k,n.length-1));n.forEach(x=>{x.classList.remove('active');x.setAttribute('aria-pressed','false')});let b=n[i];b.classList.add('active');b.setAttribute('aria-pressed','true');b.scrollIntoView({behavior:'smooth',block:'center'});syncSentence(i);repeatsLeft=Math.max(0,repeatCount-1);active=true;call('seekTo',+b.dataset.start,true);call('playVideo')};
@@ -1092,6 +1097,12 @@ with gr.Blocks(
                 "Chọn lấy phụ đề có sẵn rồi để Qwen gom caption thành câu, hoặc chạy WhisperX "
                 "để AI chép lời trực tiếp từ audio. Chế độ WhisperX chỉ tải audio tạm thời "
                 "và xóa file sau khi nhận dạng xong."
+            )
+            gr.Markdown(
+                "**Nếu Space không kết nối được YouTube:** mở video bằng link **Mở YouTube** "
+                "ngay dưới player, mở bảng **Show transcript**, sao chép các dòng có timestamp, "
+                "rồi quay lại mục Import bên dưới và bấm **Dán transcript từ clipboard**. "
+                "Trình duyệt cô lập nội dung iframe YouTube nên bước sao chép cần do bạn khởi tạo."
             )
             online_mode = gr.Radio(
                 [
@@ -1256,12 +1267,23 @@ with gr.Blocks(
                 whisperx_json_file = gr.File(label="Tải JSON")
                 whisperx_srt_file = gr.File(label="Tải phụ đề SRT")
 
-    gr.Markdown("### 📥 Import transcript dự phòng")
+    gr.Markdown("### 📥 Import transcript · dùng clipboard YouTube khi Space mất kết nối")
+    gr.Markdown(
+        "Trong trang YouTube, mở **Show transcript** rồi sao chép phần văn bản có timestamp. "
+        "Có thể dán nội dung dạng `0:00` ở một dòng và câu ở dòng kế tiếp, `[00:00:00] câu`, "
+        "SRT, VTT hoặc JSON. Timestamp được giữ để đồng bộ với video."
+    )
     with gr.Row():
         file = gr.File(file_types=[".txt", ".srt", ".vtt", ".json"], type="filepath", label="TXT / SRT / VTT / JSON")
         text = gr.Textbox(
-            label="Hoặc dán transcript", lines=4, max_length=10_000_000
+            label="Hoặc dán transcript", lines=6, max_length=10_000_000,
+            elem_id="manual-transcript-text",
         )
+    gr.HTML(
+        "<div class='browser-transcript-tools'>"
+        "<button type='button' class='browser-transcript-paste'>📋 Dán transcript từ clipboard</button>"
+        "<span class='browser-transcript-message' aria-live='polite'></span></div>"
+    )
     imp = gr.Button("📥 Nạp transcript vào phiên này")
     reset_import = gr.Button("↩ Khôi phục transcript thư viện")
     imp_status = gr.Markdown()

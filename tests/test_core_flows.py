@@ -59,6 +59,14 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertGreater(result[0]["duration"], 0)
 
+    def test_copied_youtube_transcript_accepts_timestamps_on_separate_lines(self):
+        result = parse_manual("""Transcript\n0:00\nHello there.\n0:03\nHow are you?""")
+
+        self.assertEqual([segment["text"] for segment in result], ["Hello there.", "How are you?"])
+        self.assertEqual(result[0]["start"], 0)
+        self.assertEqual(result[0]["duration"], 3)
+        self.assertGreater(result[1]["duration"], 0)
+
     def test_hidden_transcript_keeps_sentence_controls_in_dom(self):
         rendered = render_transcript_html(
             [{"start": 3, "duration": 2, "text": "Hidden text."}], visible=False
