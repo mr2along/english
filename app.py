@@ -1082,8 +1082,7 @@ with gr.Blocks(
             scale=1,
         )
         gr.Markdown(
-            "Chọn câu trong transcript để đồng bộ câu mẫu cho các chức năng luyện tập.",
-            scale=3,
+            "Chọn câu trong transcript để đồng bộ câu mẫu cho các chức năng luyện tập."
         )
 
     with gr.Tabs():
